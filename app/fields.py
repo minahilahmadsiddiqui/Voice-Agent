@@ -97,3 +97,56 @@ def field_guide() -> str:
         }[f.kind]
         lines.append(f"- {f.path}: {f.ask} ({fmt})")
     return "\n".join(lines)
+
+
+# ---------- what the agent says next: scripted in code, not generated ----------
+# After the rep answers, the LLM only records the facts; the code picks the next question
+# from this list (first group with anything still missing). One LLM round trip per turn
+# instead of two, and the order can't drift. Wording follows the reference call.
+
+QUESTIONS: dict[str, list[tuple[tuple[str, ...], str]]] = {
+    "benefits": [
+        (("srp.codes.D4341.coverage_pct", "srp.codes.D4342.coverage_pct", "srp.benefit_class"),
+         "Benefits for scaling and root planing. What's the coverage percentage for D4341 and D4342?"),
+        (("srp.deductible.amount", "srp.deductible.met"), "What's the deductible, and how much has she met this year?"),
+        (("srp.annual_max", "srp.remaining"), "And the annual maximum, and how much is remaining?"),
+        (("srp.frequency", "srp.frequency_months"), "What's the frequency limitation on SRP?"),
+    ],
+    "rules": [
+        (("srp.documentation.perio_charting", "srp.documentation.radiographs",
+          "srp.documentation.min_pocket_depth_mm", "srp.documentation.bone_loss_required", "srp.documentation.preauth"),
+         "What are the documentation requirements for SRP? Charting, radiographs, narrative, pre-authorization?"),
+        (("srp.downgrade.to", "srp.downgrade.trigger"), "Does SRP ever downgrade, and to what?"),
+        (("srp.quadrants_per_dos",), "How many quadrants per date of service?"),
+    ],
+    "maintenance": [
+        (("d4910.coverage_pct", "d4910.frequency", "d4910.shared_with_d1110"),
+         "And periodontal maintenance, D4910. Coverage, frequency, and how does it interact with D1110?"),
+        (("d4910.wait_after_srp_days",), "Any waiting period between the SRP and the first D4910?"),
+    ],
+}
+
+# When only part of a group is missing, ask just for that part.
+FOLLOWUPS: dict[str, str] = {
+    "srp.codes.D4341.coverage_pct": "And the coverage percentage for D4341?",
+    "srp.codes.D4342.coverage_pct": "And for D4342, the one to three teeth code?",
+    "srp.benefit_class": "Is that basic or major?",
+    "srp.deductible.amount": "And what's the deductible amount?",
+    "srp.deductible.met": "Has she met the deductible this year?",
+    "srp.annual_max": "And what's the annual maximum?",
+    "srp.remaining": "And how much is remaining?",
+    "srp.frequency": "What's the frequency limitation on SRP?",
+    "srp.frequency_months": "How many months is that frequency window?",
+    "srp.documentation.perio_charting": "Is perio charting required?",
+    "srp.documentation.radiographs": "Are radiographs required?",
+    "srp.documentation.min_pocket_depth_mm": "Is there a minimum pocket depth?",
+    "srp.documentation.bone_loss_required": "Do the radiographs need to show bone loss?",
+    "srp.documentation.preauth": "Is pre-authorization required?",
+    "srp.downgrade.to": "Does SRP ever downgrade, and to what?",
+    "srp.downgrade.trigger": "When does that downgrade happen?",
+    "srp.quadrants_per_dos": "How many quadrants per date of service?",
+    "d4910.coverage_pct": "What's the coverage for D4910?",
+    "d4910.frequency": "And how often is D4910 covered?",
+    "d4910.shared_with_d1110": "Does D4910 share that frequency with regular prophy?",
+    "d4910.wait_after_srp_days": "Any waiting period between the SRP and the first D4910?",
+}

@@ -51,6 +51,10 @@ class TextAgent:
         else:
             self.messages.append({"role": "user", "content": blocks})
 
+    def _say(self, line: str, turn: AgentTurn) -> None:
+        turn.spoken = f"{turn.spoken} {line}".strip()
+        self.messages.append({"role": "assistant", "content": [{"type": "text", "text": line}]})
+
     async def hear(self, text: str) -> AgentTurn:
         """The other side said `text`; returns what the agent says/does in response."""
         self._add_user([{"type": "text", "text": text}])
@@ -87,7 +91,7 @@ class TextAgent:
             if not uses:
                 break
 
-            results, respond, moved = [], True, False
+            results, respond, moved, confirm = [], True, False, False
             for u in uses:
                 outcome = run_tool(self.state, u.name, dict(u.input or {}))
                 turn.tools.append(u.name)
@@ -97,12 +101,23 @@ class TextAgent:
                     moved = True
                 if not outcome.respond:
                     respond = False
+                if outcome.confirm:
+                    confirm = True
                 results.append({"type": "tool_result", "tool_use_id": u.id,
                                  "content": json.dumps(outcome.result, default=str)})
             self._add_user(results)
+            # Same decisions as callflow/nodes.py on a live call:
+            if confirm:
+                continue  # a value looks misheard: the LLM checks it in its own words
             if moved:
                 respond = RESPOND_ON_ENTER[self.state.stage]
             if not respond:
+                break
+            if "?" in (text or "") and not muted:
+                break  # the LLM already asked something in this reply
+            line = self.state.next_line()
+            if line:
+                self._say(line, turn)  # scripted next question / read-back: no second LLM call
                 break
         if turn.spoken:
             self.state.add_turn("agent", turn.spoken)

@@ -80,7 +80,7 @@ async def extract(state: CallState) -> dict | None:
         system="You extract structured data from call transcripts. Be exact; never guess.",
         messages=[{"role": "user", "content": extraction_prompt(state)}],
         tools=[EXTRACT_TOOL], tool_choice={"name": "submit_extraction"},
-        max_tokens=4000, temperature=0,
+        max_tokens=12000, temperature=0,
     )
     return reply.tool_uses[0].input if reply.tool_uses else None
 

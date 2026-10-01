@@ -5,6 +5,7 @@ identifier must be read digit by digit, in short groups, with pauses between gro
 Commas give the TTS a natural pause; groups of 3-4 digits are what people can hold.
 """
 
+import re
 from datetime import date
 
 DIGITS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
@@ -145,3 +146,26 @@ def money(amount: float) -> str:
     if cents:
         text += f" and {number_to_words(cents)} cent{'s' if cents != 1 else ''}"
     return text
+
+
+# ---------- safety net before text-to-speech ----------
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Long digit runs (tax ID, NPI, reference numbers), dashed numbers (84-1552037, 303-555-0192)
+# and letter-prefixed IDs (MDB40719883). Amounts like 1,247 or $1500 are left alone.
+_ID_LIKE = re.compile(r"(?<![\w$,.])(?:[A-Za-z]{1,4}\d{4,}|\d{2,4}(?:-\d{2,7})+|\d{5,})(?!\w|[,.]\d)")
+
+
+def speakable_ids(text: str) -> str:
+    """Rewrite raw IDs so the voice reads them digit by digit.
+
+    The prompts already ask the LLM to spell IDs out, but if it writes "841552037" anyway,
+    TTS would say "eight hundred forty-one million...". This catches it.
+    """
+    def fix(m: re.Match) -> str:
+        s = m.group(0)
+        if _ISO_DATE.match(s):
+            return s
+        return spell_id(s) if s[0].isalpha() else spell_digits(s)
+
+    return _ID_LIKE.sub(fix, text)

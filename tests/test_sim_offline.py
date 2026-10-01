@@ -60,33 +60,31 @@ SCRIPT = [
     [text("Hi Denise, this is an automated assistant calling on behalf of Cedar Park Dental.")],
     [tool("record_fields", fields=[f("member.active", True), f("member.effective", "2024-03-01"),
                                    f("member.benefit_year", "calendar")])],
-    [text("Coverage percentage for D4341 and D4342?")],
+    # from here on the CODE asks the next question (scripted from the checklist): no LLM call
     [tool("record_fields", fields=[f("srp.codes.D4341.coverage_pct", 80), f("srp.codes.D4342.coverage_pct", 80),
                                    f("srp.benefit_class", "basic"), f("srp.deductible.amount", 50),
                                    f("srp.deductible.met", True), f("srp.annual_max", 1500),
                                    f("srp.remaining", 1340), f("srp.frequency", "1 per quadrant / 24 months"),
                                    f("srp.frequency_months", 24)])],
-    [text("Does claim history show SRP paid, which quadrants?")],
     [text("Sure, take your time.")],                                         # rep: "let me look"
     [tool("record_quadrant", quadrants=[
         {"quadrant": "UR", "on_file": True, "code": "D4341", "paid_date": "2025-02-04", "quote": "q"},
         {"quadrant": "LR", "on_file": True, "code": "D4341", "paid_date": "2025-02-04", "quote": "q"},
         {"quadrant": "UL", "on_file": False, "quote": "q"}, {"quadrant": "LL", "on_file": False, "quote": "q"},
     ]), tool("record_fields", fields=[f("srp.frequency_counting", "date_of_service")])],
-    [text("Documentation requirements for SRP?")],
     [tool("record_fields", fields=[
         f("srp.documentation.perio_charting", True), f("srp.documentation.radiographs", True),
         f("srp.documentation.min_pocket_depth_mm", 4), f("srp.documentation.bone_loss_required", True),
         f("srp.documentation.preauth", "recommended_not_required"), f("srp.downgrade.to", "D1110"),
         f("srp.downgrade.trigger", "documentation_does_not_support_diagnosis"), f("srp.quadrants_per_dos", 2)])],
-    [text("Periodontal maintenance, D4910?")],
     [tool("record_fields", fields=[f("d4910.coverage_pct", 80), f("d4910.frequency", "2 per calendar year"),
                                    f("d4910.shared_with_d1110", True), f("d4910.wait_after_srp_days", 90)])],
-    [text("Let me read this back...")],
-    [tool("readback_done", corrections=[f("srp.remaining", 1247)])],
-    [text("Correcting to twelve forty-seven. Can I get a call reference number and your full name?")],
+    # (read-back script spoken by code)
+    [text("Correcting the remaining to twelve forty-seven."), tool("readback_done", corrections=[f("srp.remaining", 1247)])],
+    # (code asks for the reference number and full name)
     [tool("record_fields", fields=[f("call.reference", "771402988"), f("call.rep", "Denise Okafor")])],
-    [text("And this quote is not a guarantee of payment?")],
+    # the reference must be read back (confirm_with_rep), so the LLM speaks:
+    [text("That's seven seven one, four zero two, nine eight eight. And this quote is not a guarantee of payment?")],
     [tool("record_fields", fields=[f("call.disclaimer", "Correct. Benefits are subject to eligibility "
                                                          "and plan limitations at the time of service.")])],
     [text("Thanks, Denise. Goodbye.")],
@@ -142,7 +140,11 @@ def test_scripted_call_through_text_agent(tmp_calls):
         # Every call after on_hold sees only the current stage's tools.
         tool_sets = [[t["name"] for t in c["tools"]] for c in client.calls]
         assert tool_sets[0] == ["press_digits", "on_hold", "human_detected"]
-        assert "record_quadrant" in tool_sets[11]
+        assert "record_quadrant" in tool_sets[9]
+        assert spoken[1].startswith("Benefits for scaling and root planing")  # scripted by code
+        assert spoken[2].startswith("Does claim history show SRP paid")
+        assert spoken[6].startswith("Let me read this back")
+        assert "reference number" in spoken[7]
         assert client.calls[-1]["tool_choice"] == "none"  # goodbye stage: talk only
         assert not client.script  # every scripted response used
 

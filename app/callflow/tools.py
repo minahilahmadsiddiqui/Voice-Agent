@@ -22,6 +22,7 @@ class Outcome:
     next_stage: str | None = None
     respond: bool = True  # False: stay silent until the other side speaks
     dtmf: str | None = None  # keypad tones to send
+    confirm: bool = False  # something must be checked with the rep: speak again even if we already did
 
 
 @dataclass
@@ -77,6 +78,20 @@ _PERSON = re.compile(
     r"|who (am i speaking|is this|'s this|is calling)|who'?s calling|can i (get|have) (your|the)"
     r"|thanks? (you )?for (holding|waiting)|(are )?you still there|sorry (about|for) the (wait|hold)"
     r"|i'?m back|^\W*(hello|hi)\b", re.I)
+
+
+# "Let me look", "one moment"... on its own (not followed by the actual answer).
+_STALL = re.compile(
+    r"^\W*(?:(?:okay|ok|sure|alright|all right|yeah|um+|uh+|so|hmm+)[\s,.]*)*"
+    r"(?:let me (?:look|see|check|find|pull (?:that|it|this|her|the \w+) up|take a look|look that up)"
+    r"|(?:one|just a|give me a) (?:moment|second|sec|minute)|hold on|bear with me|hang on|one moment please)"
+    r"\b[\s\w,.'…-]{0,30}$", re.I)
+
+
+def is_stall(text: str) -> bool:
+    """The rep is pausing to look something up: say "take your time" at once, then wait."""
+    text = (text or "").strip()
+    return bool(text) and len(text.split()) <= 10 and bool(_STALL.match(text)) and not re.search(r"\d", text)
 
 
 def looks_like_person(text: str, mid_call: bool = False) -> bool:
@@ -265,6 +280,11 @@ def run_tool(state: CallState, name: str, args: dict) -> Outcome:
     if name not in STAGE_TOOLS.get(state.stage, []):
         return Outcome({"error": f"{name} is not available in stage {state.stage}"})
     outcome = TOOLS[name].handler(state, args or {})
+    if state.hints:
+        # Values that look misheard: the agent must confirm them before moving on.
+        outcome.result["confirm_with_rep"] = state.hints
+        state.hints = []
+        outcome.respond = outcome.confirm = True
     if outcome.next_stage:
         state.log("stage", frm=state.stage, to=outcome.next_stage)
         state.stage = outcome.next_stage

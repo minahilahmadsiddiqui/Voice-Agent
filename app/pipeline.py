@@ -9,6 +9,7 @@ STT (Deepgram) -> LLM (Claude) -> TTS (Cartesia) cascade over a Twilio media str
 
 import asyncio
 import json
+import random
 import time
 
 from fastapi import WebSocket
@@ -39,18 +40,29 @@ from pipecat.services.anthropic.llm import AnthropicLLMService
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.groq.llm import GroqLLMService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.workers.runner import WorkerRunner
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.frames.frames import TranscriptionFrame
+from pipecat.turns.empty_user_turn import EmptyUserTurnConfig
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.utils.text.base_text_filter import BaseTextFilter
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
     FastAPIWebsocketTransport,
 )
 
 from app import speech_format as sf
-from app.callflow.nodes import build_node
-from app.callflow.tools import looks_like_person, run_tool
-from app.config import CALLS_DIR, Scenario, load_scenario, settings
+from app.callflow.nodes import build_node, enter_stage
+from app.gemini_pool_llm import PooledGoogleLLMService
+from app.model_pool import ModelPool, parse_pool
+from app.callflow.tools import is_stall, looks_like_person, run_tool
+from app.config import CALLS_DIR, Scenario, groq_reasoning, load_scenario, settings
 from app.results import finalize_call
 from app.state import CallState
 
@@ -66,6 +78,9 @@ BASE_KEYTERMS = [
     "lower right", "lower left", "deductible", "annual maximum", "pre-authorization",
     "pre-treatment estimate", "radiographs", "perio charting", "pocket depth", "bone loss",
     "downgrade", "reference number", "NPI", "tax ID", "member ID", "subscriber",
+    "periodontics", "periodontal", "pre-treatment estimate", "date of service",
+    # The demo rep's name (first voice test heard "Haider" as "Heather").
+    "Haider",
 ]
 
 
@@ -201,30 +216,47 @@ def make_stt(sc: Scenario) -> DeepgramSTTService:
     )
 
 
+class SpeakableIdsFilter(BaseTextFilter):
+    """Last check before the voice: raw IDs are read digit by digit (see speech_format)."""
+
+    async def filter(self, text: str) -> str:
+        return sf.speakable_ids(text)
+
+
 def make_tts(voice: str | None = None):
+    filters = [SpeakableIdsFilter()]
     if settings.tts_provider == "cartesia":
         return CartesiaTTSService(
-            api_key=settings.cartesia_api_key,
+            api_key=settings.cartesia_api_key, text_filters=filters,
             settings=CartesiaTTSService.Settings(voice=voice or settings.cartesia_voice_id),
         )
     return DeepgramTTSService(
-        api_key=settings.deepgram_api_key,
+        api_key=settings.deepgram_api_key, text_filters=filters,
         settings=DeepgramTTSService.Settings(voice=voice or settings.deepgram_voice),
     )
 
 
 def make_llm(system_instruction: str | None = None, temperature: float = 0.2, max_tokens: int = 400):
     extra = {"system_instruction": system_instruction} if system_instruction else {}
+    if settings.llm_provider == "groq":
+        return GroqLLMService(
+            api_key=settings.groq_api_key,
+            settings=GroqLLMService.Settings(
+                model=settings.groq_model, temperature=temperature, max_tokens=max_tokens,
+                reasoning_effort=groq_reasoning(settings.groq_model), **extra),
+        )
     if settings.llm_provider == "anthropic":
         return AnthropicLLMService(
             api_key=settings.anthropic_api_key,
             settings=AnthropicLLMService.Settings(
                 model=settings.llm_model, temperature=temperature, max_tokens=max_tokens, **extra),
         )
-    return GoogleLLMService(
+    pool = ModelPool(parse_pool(settings.gemini_model))
+    return PooledGoogleLLMService(
+        pool=pool,
         api_key=settings.google_api_key,
         settings=GoogleLLMService.Settings(
-            model=settings.gemini_model, temperature=temperature, max_tokens=max_tokens, **extra),
+            model=pool.models[0], temperature=temperature, max_tokens=max_tokens, **extra),
     )
 
 
@@ -287,16 +319,70 @@ class SpeechGate(FrameProcessor):
         super().__init__()
         self._state = state
 
+    async def speak(self, text: str, append_to_context: bool = True) -> None:
+        """Say a line from code, straight to the voice. Queued at the top of the pipeline it
+        would wait behind the LLM's current reply (a "Got it." landing after the question)."""
+        if self._state.muted:
+            return
+        await self.push_frame(TTSSpeakFrame(text, append_to_context=append_to_context), FrameDirection.DOWNSTREAM)
+
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if self._state.muted and isinstance(frame, (LLMTextFrame, TTSSpeakFrame)):
             return
+        if isinstance(frame, LLMTextFrame) and frame.text.strip():
+            if not self._state.agent_reply and self._state.rep_stopped_at:
+                gap = time.time() - self._state.rep_stopped_at
+                logger.info(f"REPLY GAP {gap:.2f}s (rep stopped -> first words to the voice)")
+            # The LLM already said something this turn: a tool call in the same reply
+            # doesn't need a second LLM round trip to speak (see callflow/nodes.py).
+            self._state.agent_reply += frame.text
         await self.push_frame(frame, direction)
 
 
+STALL_ACK = "Sure, take your time."
+STALL_ACK_GAP_SECS = 20  # don't repeat "take your time" more often than this
+
+
+class StallAck(FrameProcessor):
+    """Rep says "let me look" / "one moment": answer at once, from code, and don't wake the LLM.
+
+    Without this, the turn detector waits (the rep sounds unfinished) and then the LLM takes
+    a second, so the rep hears dead air. Sits between STT and the user aggregator.
+    """
+
+    def __init__(self, state: CallState, speak):
+        super().__init__()
+        self._state = state
+        self._speak = speak  # SpeechGate.speak: straight to the voice
+        self._last_ack = 0.0
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if (isinstance(frame, TranscriptionFrame) and self._state.stage not in ("ivr", "hold", "end")
+                and is_stall(frame.text)):
+            self._state.add_turn("rep", frame.text)
+            if time.time() - self._last_ack > STALL_ACK_GAP_SECS:
+                self._last_ack = time.time()
+                await self._speak(STALL_ACK)
+            return  # swallowed: the LLM doesn't answer a stall
+        await self.push_frame(frame, direction)
+
+
+# Our voice was cut off by a noise or echo with no recognisable words: never say "please
+# repeat" (annoying); just pick up where we were.
+RESUME_AFTER_NOISE = (
+    "A noise interrupted you and no words were recognized. Do not ask the rep to repeat anything. "
+    "If your last question was cut off, ask it again briefly; otherwise say nothing."
+)
+
 IDLE_CHECK_SECS = 30  # rep silent this long after we spoke -> one gentle check-in
-ANSWER_SILENCE_SECS = 8  # call answered but nobody speaks -> say "Hello?"
-HUMAN_FALLBACK_SECS = 2.5  # person spoke on menu/hold and the LLM didn't react -> code moves on
+FILLER_AFTER_SECS = 1.3  # no reply yet this long after the rep stopped -> "Got it."
+FILLER_GAP_SECS = 6  # at most one filler in this window
+FILLERS = ["Got it.", "Okay.", "Okay, thanks."]
+SMART_TURN_STOP_SECS = 1.5  # longest wait when the rep sounds unfinished (Pipecat default 3)
+ANSWER_SILENCE_SECS = 3  # call answered but nobody speaks -> say "Hello?"
+HUMAN_FALLBACK_SECS = 0.8  # person spoke on menu/hold and the LLM didn't react -> code moves on
 
 
 async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str, call_sid: str,
@@ -309,14 +395,25 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(), user_idle_timeout=IDLE_CHECK_SECS,
+            user_turn_strategies=UserTurnStrategies(
+                # While we speak, only 2+ real words interrupt us (not a cough, "mm-hm" or echo).
+                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+                # Smart Turn waits up to 3 s by default when the rep *sounds* unfinished,
+                # which felt slow on short answers ("Two.", "Ninety days.").
+                stop=[TurnAnalyzerUserTurnStopStrategy(
+                    turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=SMART_TURN_STOP_SECS)))],
+            ),
+            empty_user_turn=EmptyUserTurnConfig(interrupted_prompt=RESUME_AFTER_NOISE),
         ),
     )
+    gate = SpeechGate(state)
     pipeline = Pipeline([
         transport.input(),
         stt,
+        StallAck(state, gate.speak),
         aggregators.user(),
         llm,
-        SpeechGate(state),
+        gate,
         tts,
         transport.output(),
         aggregators.assistant(),
@@ -328,6 +425,24 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         logger.info(f"DTMF -> {digits}")
         await task.queue_frame(OutputDTMFFrame(buttons=[KeypadEntry(c) for c in digits]))
 
+    async def say(text: str) -> None:
+        """The code speaks a scripted line (next question, read-back) - no LLM round trip."""
+        if state.rep_stopped_at and not state.agent_reply:
+            logger.info(f"REPLY GAP {time.time() - state.rep_stopped_at:.2f}s (scripted line)")
+        state.agent_reply += text
+        await gate.speak(text)
+
+    last_filler = {"t": 0.0}
+
+    async def filler_if_slow(stopped_at: float):
+        # The free LLM sometimes takes seconds. Rather than dead air, acknowledge briefly.
+        await asyncio.sleep(FILLER_AFTER_SECS)
+        if (state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted
+                and time.time() - last_filler["t"] > FILLER_GAP_SECS):
+            last_filler["t"] = time.time()
+            logger.info("Reply is slow: saying a short acknowledgement")
+            await gate.speak(random.choice(FILLERS), append_to_context=False)
+
     idle = {"prompted": False}
 
     async def hello_if_silent():
@@ -335,7 +450,7 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         await asyncio.sleep(ANSWER_SILENCE_SECS)
         if state.stage == "ivr" and not state.transcript:
             logger.info("No speech after answer: saying hello")
-            await task.queue_frame(TTSSpeakFrame("Hello?"))
+            await gate.speak("Hello?")
 
     async def force_human_if_missed(digits_before: int):
         # The LLM should call human_detected itself; if it hasn't shortly after a person
@@ -348,13 +463,13 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         outcome = run_tool(state, "human_detected", {})
         logger.warning(f"LLM missed a live person in stage {stage}: moving to {outcome.next_stage}")
         if outcome.next_stage:
-            await flow_manager.set_node_from_config(build_node(state.stage, state, send_dtmf))
+            await flow_manager.set_node_from_config(await enter_stage(state, send_dtmf, say))
 
     @transport.event_handler("on_client_connected")
     async def on_connected(_transport, _client):
         state.connected_at = time.time()
         # Outbound: the phone system or the rep speaks first, so the first node waits.
-        await flow_manager.initialize(build_node("ivr", state, send_dtmf, first=True))
+        await flow_manager.initialize(build_node("ivr", state, send_dtmf, first=True, say=say))
         asyncio.create_task(hello_if_silent())
 
     @aggregators.user().event_handler("on_user_turn_started")
@@ -364,11 +479,16 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
     @aggregators.user().event_handler("on_user_turn_stopped")
     async def on_user_stopped(_agg, _strategy, message):
         text = message.content or ""
+        state.agent_reply = ""  # a new LLM reply starts now
+        state.rep_stopped_at = time.time()
         mid_call = state.resume_stage is not None
         speaker = "ivr" if state.stage in ("ivr", "hold") and not mid_call else "rep"
         state.add_turn(speaker, text)
         if state.stage in ("ivr", "hold") and looks_like_person(text, mid_call=mid_call):
             asyncio.create_task(force_human_if_missed(len(state.digits_sent)))
+        elif (state.stage not in ("ivr", "hold", "end") and len(text.split()) >= 3
+              and not text.rstrip().endswith("?")):
+            asyncio.create_task(filler_if_slow(state.rep_stopped_at))
 
     @aggregators.assistant().event_handler("on_assistant_turn_stopped")
     async def on_assistant_stopped(_agg, message):
@@ -381,7 +501,7 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         if state.stage in ("ivr", "hold", "end") or idle["prompted"]:
             return
         idle["prompted"] = True
-        await task.queue_frame(TTSSpeakFrame("I'm still here whenever you're ready."))
+        await gate.speak("I'm still here whenever you're ready.")
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(_transport, _client):

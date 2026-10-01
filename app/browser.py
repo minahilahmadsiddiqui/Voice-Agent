@@ -8,14 +8,16 @@ Set BROWSER_MODE in .env to chat / ivr_test / tts_test to use a test mode instea
 """
 
 import os
+import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi.responses import RedirectResponse, Response
 from loguru import logger
 from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
+    IceCandidate,
     SmallWebRTCPatchRequest,
     SmallWebRTCRequest,
     SmallWebRTCRequestHandler,
@@ -61,6 +63,33 @@ async def offer(request: SmallWebRTCRequest, background_tasks: BackgroundTasks):
 async def ice_candidate(request: SmallWebRTCPatchRequest):
     await _handler.handle_patch_request(request)
     return {"status": "success"}
+
+
+# The prebuilt page first POSTs /start, then sends its WebRTC offer to
+# /sessions/{id}/api/offer (same flow as Pipecat's own runner).
+_sessions: set[str] = set()
+
+
+@router.post("/start")
+async def start():
+    session_id = str(uuid.uuid4())
+    _sessions.add(session_id)
+    return {"sessionId": session_id,
+            "iceConfig": {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}}
+
+
+@router.api_route("/sessions/{session_id}/api/offer", methods=["POST", "PATCH"])
+async def session_offer(session_id: str, request: Request, background_tasks: BackgroundTasks):
+    if session_id not in _sessions:
+        return Response(content="Unknown session", status_code=404)
+    data = await request.json()
+    if request.method == "PATCH":
+        await _handler.handle_patch_request(SmallWebRTCPatchRequest(
+            pc_id=data["pc_id"], candidates=[IceCandidate(**c) for c in data.get("candidates", [])]))
+        return {"status": "success"}
+    req = SmallWebRTCRequest(sdp=data["sdp"], type=data["type"], pc_id=data.get("pc_id"),
+                             restart_pc=data.get("restart_pc"))
+    return await offer(req, background_tasks)
 
 
 @router.get("/browser", include_in_schema=False)

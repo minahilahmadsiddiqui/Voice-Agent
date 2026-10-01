@@ -15,7 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from app.config import load_scenario, settings
-from app.llm_client import AnthropicChat, GeminiChat
+from app.llm_client import AnthropicChat, GeminiChat, OpenAICompatChat
 from app.results import finalize_call
 from app.state import CallState
 from app.storage import connect
@@ -36,8 +36,13 @@ class Printer:
             print(f"{who:>6} | {text}")
 
 
-def chat(model: str):
-    return AnthropicChat(model) if settings.llm_provider == "anthropic" else GeminiChat(model)
+def chat(model: str, provider: str | None = None):
+    provider = provider or settings.llm_provider
+    if provider == "anthropic":
+        return AnthropicChat(model)
+    if provider == "groq":
+        return OpenAICompatChat(model)
+    return GeminiChat(model)
 
 
 async def run_once(persona_name: str, scenario: str, agent_model: str, rep_model: str,
@@ -46,7 +51,7 @@ async def run_once(persona_name: str, scenario: str, agent_model: str, rep_model
     call_sid = f"sim-{persona_name}-{datetime.now():%Y%m%d-%H%M%S}"
     state = CallState(load_scenario(scenario), call_sid=call_sid, today=date.fromisoformat(persona.today))
     agent = TextAgent(state, chat(agent_model))
-    rep = RepSim(persona, chat(rep_model))
+    rep = RepSim(persona, chat(rep_model, settings.provider_for("rep")))
     say = Printer(quiet)
     behavior = {"ivr_steps_passed": 0, "ivr_steps_total": len(persona.ivr), "spoke_on_hold": 0,
                 "pause_violations": 0, "agent_turns": 0}
@@ -136,7 +141,7 @@ async def main() -> None:
     if not getattr(settings, settings.llm_key_name):
         sys.exit(f"Set {settings.llm_key_name.upper()} in .env first (LLM_PROVIDER={settings.llm_provider}).")
 
-    print(f"Provider: {settings.llm_provider} | agent: {args.agent_model} | rep: {args.rep_model}")
+    print(f"Agent: {settings.llm_provider} {args.agent_model} | rep: {settings.provider_for('rep')} {args.rep_model}")
     reports = [await run_once(args.persona, args.scenario, args.agent_model, args.rep_model,
                               not args.no_postcall, args.quiet) for _ in range(args.runs)]
     if len(reports) > 1:

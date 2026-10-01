@@ -126,3 +126,90 @@ def test_first_name_only_still_asks_for_full_name():
     s.stage = "close"
     s.record("call.rep", "Haider", "just Haider")  # rep won't give a last name: accept, don't loop
     assert "call.rep" not in s.missing("close")
+
+
+def test_misheard_amounts_are_understood_or_flagged():
+    s = _state("benefits")
+    s.record("srp.remaining", "12 47", "twelve forty-seven")
+    assert s.value("srp.remaining") == 1247  # "twelve forty-seven" = $1,247
+    s.record("srp.remaining", "$12.47", "twelve forty-seven")
+    assert s.value("srp.remaining") == 1247
+    s.hints.clear()
+    s.record("srp.codes.D4341.coverage_pct", "8", "both 8% after deductible")
+    assert s.hints and "80%" in s.hints[0]  # agent must confirm, not silently fix
+    s.hints.clear()
+    s.record("srp.annual_max", "1000", "a thousand")
+    s.record("srp.remaining", "1340", "1340")
+    assert any("more than the annual maximum" in h for h in s.hints)
+
+
+def test_reference_number_is_read_back():
+    s = _state("close")
+    out = run_tool(s, "record_fields", {"fields": [{"path": "call.reference", "value": "77140298", "quote": "7714 0298"}]})
+    assert "digit by digit" in out.result["confirm_with_rep"][0]
+
+
+def test_raw_ids_are_spoken_digit_by_digit():
+    from app.speech_format import speakable_ids
+    out = speakable_ids("Our tax ID is 841552037, NPI is 1477588213. Remaining $1,247 since 2025-02-04.")
+    assert "841552037" not in out and "eight four one" in out
+    assert "$1,247" in out and "2025-02-04" in out  # amounts and dates untouched
+
+
+def test_stall_phrases_get_instant_ack():
+    from app.callflow.tools import is_stall
+    for t in ["Let me look.", "Let me see...", "Okay, let me pull that up.", "One moment.", "Hold on",
+              "Um, let me check", "Give me a second.", "Bear with me."]:
+        assert is_stall(t), t
+    for t in ["Let me look... I show D4341 paid on 02/04/2025", "Fifty dollars, and it's met.",
+              "Let me see, it's eighty percent after deductible", "Two."]:
+        assert not is_stall(t), t
+
+
+def test_no_second_llm_call_when_question_already_asked():
+    import asyncio
+
+    from pipecat.flows.types import NO_RESPONSE
+
+    from app.callflow.nodes import build_node
+
+    async def dtmf(_):
+        pass
+
+    s = _state("benefits")
+    fns = {fn.name: fn for fn in build_node("benefits", s, dtmf)["functions"]}
+    args = {"fields": [{"path": "srp.deductible.amount", "value": "50", "quote": "fifty"}]}
+
+    async def run():
+        s.agent_reply = "Got it, and has she met it this year?"
+        _, nxt = await fns["record_fields"].handler(args, None)
+        assert nxt is NO_RESPONSE  # already asked: no second round trip
+        s.agent_reply = "Got it."
+        _, nxt = await fns["record_fields"].handler(args, None)
+        assert nxt is None  # no question yet: the LLM speaks again
+        s.agent_reply = "And the maximum?"
+        _, nxt = await fns["record_fields"].handler(
+            {"fields": [{"path": "srp.codes.D4341.coverage_pct", "value": "8", "quote": "8%"}]}, None)
+        assert nxt is None  # odd value: must confirm, so speak again
+
+    asyncio.run(run())
+
+
+def test_scripted_questions_follow_the_checklist():
+    s = _state("benefits")
+    assert "D4341 and D4342" in s.next_line()
+    for p, v in [("srp.codes.D4341.coverage_pct", 80), ("srp.codes.D4342.coverage_pct", 80),
+                 ("srp.benefit_class", "basic"), ("srp.deductible.amount", 50)]:
+        s.record(p, v, "q")
+    assert s.next_line() == "Has she met the deductible this year?"  # only the missing part
+    s.stage = "history"
+    assert "Which quadrants" in s.next_line()
+    s.record_quadrant("UR", True, "D4341", "2025-02-04", "q")
+    s.record_quadrant("LR", True, "D4341", "2025-02-04", "q")
+    assert s.next_line() == "So upper left and lower left have nothing on file?"  # absence is data
+    s.record_quadrant("UL", False, quote="q")
+    s.record_quadrant("LL", False, quote="q")
+    s.record("srp.frequency_months", 24, "q")
+    assert "eligible again February fourth, twenty twenty-seven" in s.next_line()  # date math, confirmed
+    s.stage = "close"
+    assert s.next_line() == "Can I get a call reference number and your full name?"

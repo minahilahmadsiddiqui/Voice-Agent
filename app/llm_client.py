@@ -16,7 +16,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.config import settings
+from app.config import groq_reasoning, settings
+from app.model_pool import ModelPool, is_retryable, parse_pool, thinking_level
 
 
 @dataclass
@@ -64,10 +65,15 @@ class AnthropicChat:
 class GeminiChat:
     provider = "google"
 
-    def __init__(self, model: str, api_key: str | None = None):
+    def __init__(self, model: str, api_key: str | None = None, thinking: str | None = None):
+        """model: one model or a comma-separated pool (tried in order on rate limits)."""
         from google import genai
 
+        self.pool = ModelPool(parse_pool(model))
         self.model = model
+        # Same as Pipecat on the live call: lowest thinking level (fast, and thinking can't
+        # eat the output budget). Post-call passes a higher level.
+        self.thinking = thinking
         self.client = genai.Client(api_key=api_key or settings.google_api_key)
 
     def _contents(self, messages: list[dict]):
@@ -104,6 +110,28 @@ class GeminiChat:
                 contents.append(types.Content(role="model" if m["role"] == "assistant" else "user", parts=parts))
         return contents
 
+    async def _generate(self, contents, config, attempts: int = 12):
+        """Next model in the pool on rate limit / overload; wait only if all are resting."""
+        import asyncio
+
+        from google.genai import errors, types
+
+        for i in range(attempts):
+            wait = self.pool.wait_secs()
+            if wait:
+                print(f"  (all Gemini models rate limited: waiting {wait:.0f}s)")
+                await asyncio.sleep(wait)
+            model = self.pool.order()[0]
+            level = self.thinking if model.startswith("gemini-3") and self.thinking else thinking_level(model)
+            cfg = config.model_copy(update={"thinking_config": types.ThinkingConfig(thinking_level=level)}) \
+                if level else config
+            try:
+                return await self.client.aio.models.generate_content(model=model, contents=contents, config=cfg)
+            except errors.APIError as e:
+                if not is_retryable(e) or i == attempts - 1:
+                    raise
+                self.pool.cool(model, e)
+
     async def create(self, *, system: str, messages: list[dict], tools: list[dict] | None = None,
                      tool_choice: str | dict = "auto", max_tokens: int = 500, temperature: float = 0.2) -> Reply:
         from google.genai import types
@@ -122,10 +150,7 @@ class GeminiChat:
             else:
                 fcc = types.FunctionCallingConfig(mode="AUTO")
             config["tool_config"] = types.ToolConfig(function_calling_config=fcc)
-        resp = await self.client.aio.models.generate_content(
-            model=self.model, contents=self._contents(messages),
-            config=types.GenerateContentConfig(**config),
-        )
+        resp = await self._generate(self._contents(messages), types.GenerateContentConfig(**config))
         content = resp.candidates[0].content if resp.candidates else None
         parts = (content.parts if content else None) or []
         text = " ".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False)).strip()
@@ -135,9 +160,81 @@ class GeminiChat:
         return Reply(text, uses, raw=content)
 
 
-def make_chat(role: str) -> AnthropicChat | GeminiChat:
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+
+class OpenAICompatChat:
+    """Groq (or any OpenAI-compatible API). Converts the neutral message format to OpenAI's."""
+
+    provider = "groq"
+
+    def __init__(self, model: str, api_key: str | None = None, base_url: str = GROQ_BASE_URL):
+        from openai import AsyncOpenAI
+
+        self.model = model
+        self.client = AsyncOpenAI(api_key=api_key or settings.groq_api_key, base_url=base_url, max_retries=6)
+
+    @staticmethod
+    def _messages(system: str, messages: list[dict]) -> list[dict]:
+        out: list[dict] = [{"role": "system", "content": system}]
+        for m in messages:
+            blocks = m["content"]
+            if isinstance(blocks, str):
+                blocks = [{"type": "text", "text": blocks}]
+            text = " ".join(b["text"] for b in blocks if b["type"] == "text" and b["text"]).strip()
+            if m["role"] == "assistant":
+                calls = [{"id": b["id"], "type": "function",
+                          "function": {"name": b["name"], "arguments": json.dumps(b["input"])}}
+                         for b in blocks if b["type"] == "tool_use"]
+                msg: dict[str, Any] = {"role": "assistant", "content": text or None}
+                if calls:
+                    msg["tool_calls"] = calls
+                out.append(msg)
+                continue
+            # Tool results first (they must follow the assistant's tool calls), then any new text.
+            for b in blocks:
+                if b["type"] == "tool_result":
+                    out.append({"role": "tool", "tool_call_id": b["tool_use_id"], "content": str(b["content"])})
+            if text:
+                out.append({"role": "user", "content": text})
+        return out
+
+    async def create(self, *, system: str, messages: list[dict], tools: list[dict] | None = None,
+                     tool_choice: str | dict = "auto", max_tokens: int = 500, temperature: float = 0.2) -> Reply:
+        kwargs: dict[str, Any] = {}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": {
+                "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in tools]
+            if tool_choice == "none":
+                kwargs["tool_choice"] = "none"
+            elif isinstance(tool_choice, dict):
+                kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice["name"]}}
+            else:
+                kwargs["tool_choice"] = "auto"
+        if groq_reasoning(self.model):
+            kwargs["reasoning_effort"] = groq_reasoning(self.model)
+        resp = await self.client.chat.completions.create(
+            model=self.model, messages=self._messages(system, messages),
+            max_tokens=max_tokens, temperature=temperature, **kwargs,
+        )
+        msg = resp.choices[0].message
+        uses = []
+        for c in msg.tool_calls or []:
+            try:
+                args = json.loads(c.function.arguments or "{}")
+            except ValueError:
+                args = {}
+            uses.append(ToolUse(c.id or f"call_{uuid.uuid4().hex[:8]}", c.function.name, args))
+        return Reply((msg.content or "").strip(), uses)
+
+
+def make_chat(role: str) -> AnthropicChat | GeminiChat | OpenAICompatChat:
     """role: agent | rep | postcall. Picks provider and model from settings."""
     model = settings.model_for(role)
-    if settings.llm_provider == "anthropic":
+    provider = settings.provider_for(role)
+    if provider == "anthropic":
         return AnthropicChat(model)
-    return GeminiChat(model)
+    if provider == "groq":
+        return OpenAICompatChat(model)
+    # After the call there is no time pressure: let the model think more for accuracy.
+    return GeminiChat(model, thinking="medium" if role == "postcall" else None)

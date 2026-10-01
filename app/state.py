@@ -14,7 +14,7 @@ from typing import Any
 from app import speech_format as sf
 from app.config import Scenario
 from app.eligibility import next_eligible
-from app.fields import QUADRANT_NAMES, QUADRANTS, SPECS, STAGES, FieldSpec, fields_for
+from app.fields import FOLLOWUPS, QUADRANT_NAMES, QUADRANTS, QUESTIONS, SPECS, STAGES, FieldSpec, fields_for
 from app.schema import FieldStatus
 
 RESOLVED = {FieldStatus.ANSWERED, FieldStatus.REFUSED, FieldStatus.UNKNOWN,
@@ -102,6 +102,10 @@ def coerce(spec: FieldSpec, raw: Any) -> Any:
             raise ValueError_("percent must be 0-100")
         return int(round(v))
     if spec.kind == "money":
+        # "twelve forty-seven" often reaches us as "12 47" or "12.47": in benefits talk it means $1,247.
+        m = re.fullmatch(r"\$?\s*(\d{1,2})[\s.](\d{2})", str(raw).strip())
+        if m and not str(raw).strip().startswith("$0"):
+            return int(m.group(1) + m.group(2))
         v = _num(raw)
         return int(v) if v.is_integer() else v
     if spec.kind == "int":
@@ -158,6 +162,9 @@ class CallState:
         self.readback_done = False
         self.resume_stage: str | None = None  # stage to return to after a mid-call hold
         self.asked_before_leaving = False  # rep wanted to go; we asked once for the reference
+        self.hints: list[str] = []  # sanity checks for the agent, handed over in the next tool result
+        self.agent_reply = ""  # what the LLM has said so far in its current reply
+        self.rep_stopped_at: float | None = None  # end of the rep's last turn (for latency logs)
         self.ended_reason: str | None = None
         self.connected_at = time.time()
         self.human_at: float | None = None
@@ -213,6 +220,28 @@ class CallState:
         cap.quote, cap.turn = quote or self.last_rep_text(), self.last_rep_turn()
         cap.stage = self.stage
         self.log("record", path=path, value=str(value))
+        hint = self.sanity_hint(path, value)
+        if hint:
+            self.hints.append(hint)
+        return None
+
+    def sanity_hint(self, path: str, value: Any) -> str | None:
+        """Speech-to-text mishears numbers. Flag values that look wrong so the agent confirms
+        them with the rep (it never silently 'fixes' them)."""
+        spec = SPECS[path]
+        if path == "call.reference":
+            return f"Read the reference number back digit by digit to confirm: {sf.spell_digits(str(value))}."
+        if spec.kind == "pct" and (value % 5 or value < 20):
+            return f"{value}% is unusual for coverage; confirm it (did they say {value * 10}%?)." if value < 10 \
+                else f"{value}% is unusual for coverage; confirm it."
+        if spec.kind == "money":
+            mx, rem = self.value("srp.annual_max"), self.value("srp.remaining")
+            if isinstance(value, float):
+                return f"{path} = {value} has cents; benefit amounts are whole dollars. Confirm the amount."
+            if mx is not None and rem is not None and rem > mx:
+                return f"Remaining ({rem}) is more than the annual maximum ({mx}). Confirm both."
+            if path == "srp.annual_max" and (value % 50 or value > 5000):
+                return f"Annual maximum {value} is unusual. Confirm it (e.g. did they say fifteen hundred?)."
         return None
 
     def mark(self, path: str, status: FieldStatus, quote: str | None = None) -> str | None:
@@ -322,6 +351,57 @@ class CallState:
                 continue
             return s
         return "end"
+
+    # ---------- what the code says next (no LLM round trip) ----------
+
+    def next_line(self, stage: str | None = None) -> str | None:
+        """The next question for this stage, scripted from the checklist, or None when the
+        LLM must handle it (introduction, goodbye, phone menu, hold)."""
+        stage = stage or self.stage
+        missing = set(self.missing(stage))
+        if stage in QUESTIONS:
+            for paths, question in QUESTIONS[stage]:
+                open_ = [p for p in paths if p in missing]
+                if not open_:
+                    continue
+                if len(open_) == len([p for p in paths if SPECS[p].required]):
+                    return question
+                return FOLLOWUPS[open_[0]]
+            return None
+        if stage == "history":
+            return self._history_line(missing)
+        if stage == "readback":
+            return None if self.readback_done else self.readback_script()
+        if stage == "close":
+            if "call.reference" in missing:
+                return ("Can I get a call reference number and your full name?" if "call.rep" in missing
+                        else "Can I get a call reference number?")
+            if "call.rep" in missing:
+                return "And your last name?" if self.values["call.rep"].value else "And your full name?"
+            if "call.disclaimer" in missing:
+                return "And to confirm for our file, this quote is not a guarantee of payment?"
+        return None
+
+    def _history_line(self, missing: set[str]) -> str | None:
+        open_q = [q for q in QUADRANTS if f"srp.history.{q}" in missing]
+        if len(open_q) == len(QUADRANTS):
+            return "Does claim history show SRP paid? Which quadrants, and what dates?"
+        if open_q:
+            names = " and ".join(QUADRANT_NAMES[q] for q in open_q)
+            return f"So {names} {'has' if len(open_q) == 1 else 'have'} nothing on file?"
+        if "srp.frequency_counting" in missing:
+            # The arithmetic, done in code, confirmed back to the rep.
+            dates: dict[str, list[str]] = {}
+            for q in QUADRANTS:
+                ne = self.next_eligible(q)
+                if ne and ne != "now":
+                    dates.setdefault(ne, []).append(QUADRANT_NAMES[q])
+            if dates:
+                parts = [f"{' and '.join(qs)} {'come' if len(qs) > 1 else 'comes'} eligible again {sf.spoken_date(d)}"
+                         for d, qs in dates.items()]
+                return f"Then {'; '.join(parts)}. Is that counted date of service to date of service?"
+            return "Is the frequency counted date of service to date of service?"
+        return None
 
     # ---------- text for prompts and read-back ----------
 
