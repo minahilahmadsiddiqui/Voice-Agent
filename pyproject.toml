@@ -1,0 +1,29 @@
+[project]
+name = "srp-voice-agent"
+version = "0.1.0"
+description = "Outbound voice agent that verifies SRP dental benefits with a live insurance rep"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    # Pipecat 1.12 ships Flows built in (import from pipecat.flows)
+    "pipecat-ai[deepgram,cartesia,anthropic,silero,websocket]==1.12.0",
+    "fastapi",
+    "uvicorn[standard]",
+    "python-multipart",
+    "twilio",
+    "python-dotenv",
+    "pyyaml",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.callflow", "sim"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,393 @@
+"""Builds and runs the Pipecat voice pipeline for one phone call.
+
+STT (Deepgram) -> LLM (Claude) -> TTS (Cartesia) cascade over a Twilio media stream.
+  verify    THE REAL CALL: Pipecat Flows stages driven by the CallState checklist
+  chat      free conversation, to check the phone line, latency and barge-in
+  ivr_test  navigate a phone menu with speech + keypad tones, wait on hold, greet the rep
+  tts_test  read the scenario's IDs and dates aloud (for comparing voices), then hang up
+"""
+
+import asyncio
+import json
+import time
+
+from fastapi import WebSocket
+from loguru import logger
+from pipecat.adapters.schemas.function_schema import FunctionSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.dtmf.types import KeypadEntry
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.flows import FlowManager
+from pipecat.frames.frames import (
+    EndFrame,
+    Frame,
+    FunctionCallResultProperties,
+    LLMTextFrame,
+    OutputDTMFFrame,
+    TTSSpeakFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.serializers.twilio import TwilioFrameSerializer
+from pipecat.services.anthropic.llm import AnthropicLLMService
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.tts import DeepgramTTSService
+from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.workers.runner import WorkerRunner
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
+
+from app import speech_format as sf
+from app.callflow.nodes import build_node
+from app.callflow.tools import looks_like_person, run_tool
+from app.config import CALLS_DIR, Scenario, load_scenario, settings
+from app.results import finalize_call
+from app.state import CallState
+
+TWILIO_SAMPLE_RATE = 8000
+# Pipecat cancels a pipeline (= hangs up) after 5 idle minutes by default. A payer's hold
+# queue can be longer than that, and hold music is never a reason to hang up.
+MAX_IDLE_SECS = 30 * 60
+
+# Words Deepgram should favour on insurance calls (Nova-3 keyterm prompting).
+BASE_KEYTERMS = [
+    "SRP", "scaling and root planing", "D4341", "D4342", "D4910", "D1110",
+    "prophy", "periodontal maintenance", "quadrant", "upper right", "upper left",
+    "lower right", "lower left", "deductible", "annual maximum", "pre-authorization",
+    "pre-treatment estimate", "radiographs", "perio charting", "pocket depth", "bone loss",
+    "downgrade", "reference number", "NPI", "tax ID", "member ID", "subscriber",
+]
+
+
+def scenario_keyterms(sc: Scenario) -> list[str]:
+    return BASE_KEYTERMS + [sc.payer.name, sc.practice.name, sc.practice.provider_name, sc.patient.name]
+
+
+def chat_prompt(sc: Scenario) -> str:
+    return (
+        f"You are an automated assistant calling on behalf of {sc.practice.name}. "
+        "This is a test call to check the phone line. Chat briefly and naturally with the person. "
+        "Keep every reply to one or two short sentences: your words are spoken aloud on a phone call, "
+        "so never use lists, markdown, emoji or symbols. If asked, say honestly that you are an "
+        "automated assistant. Wait for the other person to speak first."
+    )
+
+
+def ivr_prompt(sc: Scenario) -> str:
+    tax_digits = "".join(c for c in sc.practice.tax_id if c.isdigit())
+    return (
+        f"You are an automated assistant phoning the {sc.payer.name} provider services line on "
+        f"behalf of {sc.practice.name}. Your words are spoken aloud on a phone call.\n"
+        "Rules:\n"
+        "- Recorded menu offering options: when it offers eligibility or benefits, say just "
+        "'Benefits', or call press_digits with the key it names.\n"
+        f"- When asked to enter the provider tax ID, call press_digits with '{tax_digits}#'. "
+        "Do not say the digits aloud.\n"
+        "- On hold, music, or recorded messages ('your call is important', 'estimated wait'): "
+        "stay completely silent. Reply with nothing at all. Never hang up.\n"
+        "- When a live person greets you, say: 'Hi, this is an automated assistant calling on "
+        f"behalf of {sc.practice.name}. This is a test call, thank you, goodbye.' and then stop."
+    )
+
+
+def tts_test_lines(sc: Scenario) -> list[str]:
+    p, m = sc.practice, sc.patient
+    return [
+        "This is a voice clarity test.",
+        f"Provider tax ID, {sf.spell_digits(p.tax_id)}.",
+        f"N P I, {sf.spell_digits(p.npi)}.",
+        f"Member ID, {sf.spell_id(m.member_id)}.",
+        f"Spelled out, {sf.spell_id(m.member_id, phonetic=True)}.",
+        f"Date of birth, {sf.spoken_date(m.dob)}.",
+        f"Callback number, {sf.phone_number(p.callback_phone)}.",
+        f"Remaining maximum, {sf.money(1247)}.",
+        "End of test. Goodbye.",
+    ]
+
+
+PRESS_DIGITS = FunctionSchema(
+    name="press_digits",
+    description="Send keypad (DTMF) tones to the phone menu, e.g. '1' or '841552037#'.",
+    properties={
+        "digits": {"type": "string", "description": "Keys to press: 0-9, * and #."},
+    },
+    required=["digits"],
+)
+
+
+async def press_digits(params: FunctionCallParams):
+    raw = str(params.arguments.get("digits", ""))
+    buttons = [KeypadEntry(c) for c in raw if c in "0123456789*#"]
+    logger.info(f"DTMF -> {raw!r}")
+    if buttons:
+        await params.llm.push_frame(OutputDTMFFrame(buttons=buttons))
+    # Don't let the LLM talk right after keying digits: the menu speaks next.
+    await params.result_callback(
+        {"sent": "".join(b.value for b in buttons)},
+        properties=FunctionCallResultProperties(run_llm=False),
+    )
+
+
+def make_worker(pipeline: Pipeline, sample_rate: int | None = TWILIO_SAMPLE_RATE) -> PipelineWorker:
+    """sample_rate: 8000 for phone calls; None lets a browser session use Pipecat's defaults."""
+    rates = {"audio_in_sample_rate": sample_rate, "audio_out_sample_rate": sample_rate} if sample_rate else {}
+    return PipelineWorker(
+        pipeline,
+        params=PipelineParams(
+            **rates,
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        idle_timeout_secs=MAX_IDLE_SECS,
+    )
+
+
+def save_call_log(call_sid: str, mode: str, started: float, context: LLMContext) -> None:
+    CALLS_DIR.mkdir(exist_ok=True)
+    path = CALLS_DIR / f"{call_sid}.json"
+    data = {
+        "call_sid": call_sid,
+        "mode": mode,
+        "duration_sec": round(time.time() - started),
+        "messages": context.get_messages(),
+    }
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    logger.info(f"Saved call log: {path}")
+
+
+async def run_call(websocket: WebSocket, call_data: dict) -> None:
+    """A Twilio phone call: media stream over a websocket, 8 kHz audio."""
+    body = call_data.get("body") or {}
+    call_sid = call_data["call_id"]
+    serializer = TwilioFrameSerializer(
+        stream_sid=call_data["stream_id"],
+        call_sid=call_sid,
+        account_sid=settings.twilio_account_sid,
+        auth_token=settings.twilio_auth_token,
+    )
+    transport = FastAPIWebsocketTransport(
+        websocket=websocket,
+        params=FastAPIWebsocketParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+            add_wav_header=False,
+            serializer=serializer,
+        ),
+    )
+    await run_session(
+        transport, mode=body.get("mode", "verify"), scenario_name=body.get("scenario", "lana_kane"),
+        call_sid=call_sid, sample_rate=TWILIO_SAMPLE_RATE, voice=body.get("voice"), kind="live",
+    )
+
+
+# ---------- services, chosen from settings ----------
+
+def make_stt(sc: Scenario) -> DeepgramSTTService:
+    return DeepgramSTTService(
+        api_key=settings.deepgram_api_key,
+        settings=DeepgramSTTService.Settings(
+            model="nova-3-general", keyterm=scenario_keyterms(sc), smart_format=True, numerals=True,
+        ),
+    )
+
+
+def make_tts(voice: str | None = None):
+    if settings.tts_provider == "cartesia":
+        return CartesiaTTSService(
+            api_key=settings.cartesia_api_key,
+            settings=CartesiaTTSService.Settings(voice=voice or settings.cartesia_voice_id),
+        )
+    return DeepgramTTSService(
+        api_key=settings.deepgram_api_key,
+        settings=DeepgramTTSService.Settings(voice=voice or settings.deepgram_voice),
+    )
+
+
+def make_llm(system_instruction: str | None = None, temperature: float = 0.2, max_tokens: int = 400):
+    extra = {"system_instruction": system_instruction} if system_instruction else {}
+    if settings.llm_provider == "anthropic":
+        return AnthropicLLMService(
+            api_key=settings.anthropic_api_key,
+            settings=AnthropicLLMService.Settings(
+                model=settings.llm_model, temperature=temperature, max_tokens=max_tokens, **extra),
+        )
+    return GoogleLLMService(
+        api_key=settings.google_api_key,
+        settings=GoogleLLMService.Settings(
+            model=settings.gemini_model, temperature=temperature, max_tokens=max_tokens, **extra),
+    )
+
+
+async def run_session(transport, *, mode: str, scenario_name: str, call_sid: str,
+                      sample_rate: int | None, voice: str | None = None, kind: str = "live") -> None:
+    """One voice session over any transport (Twilio phone call or browser WebRTC)."""
+    sc = load_scenario(scenario_name)
+    logger.info(f"Session {call_sid} ({kind}) mode={mode} llm={settings.llm_provider} tts={settings.tts_provider}")
+    stt, tts = make_stt(sc), make_tts(voice)
+    if mode == "verify":
+        await run_verification(transport, stt, tts, sc, scenario_name, call_sid, sample_rate, kind)
+        return
+
+    llm = make_llm(ivr_prompt(sc) if mode == "ivr_test" else chat_prompt(sc), temperature=0.3, max_tokens=300)
+    tools = ToolsSchema(standard_tools=[PRESS_DIGITS]) if mode == "ivr_test" else None
+    if tools:
+        llm.register_function("press_digits", press_digits)
+
+    context = LLMContext(messages=[], tools=tools) if tools else LLMContext(messages=[])
+    aggregators = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+    )
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        aggregators.user(),
+        llm,
+        tts,
+        transport.output(),
+        aggregators.assistant(),
+    ])
+    task = make_worker(pipeline, sample_rate)
+    started = time.time()
+
+    @transport.event_handler("on_client_connected")
+    async def on_connected(_transport, _client):
+        if mode == "tts_test":
+            # Speak the fixed script, then EndFrame ends the session (hangs up a phone call).
+            await task.queue_frames([TTSSpeakFrame(t) for t in tts_test_lines(sc)] + [EndFrame()])
+        # chat / ivr_test: the other side speaks first ("Hello?" or the IVR greeting).
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_disconnected(_transport, _client):
+        logger.info(f"Session {call_sid} disconnected")
+        save_call_log(call_sid, mode, started, context)
+        await task.cancel()
+
+    await WorkerRunner(handle_sigint=False).run(task)
+
+
+class SpeechGate(FrameProcessor):
+    """Drops everything the LLM tries to say while the call is on hold.
+
+    Prompts ask for silence on hold; this makes it a guarantee: hold music is
+    never a reason to talk (or to hang up).
+    """
+
+    def __init__(self, state: CallState):
+        super().__init__()
+        self._state = state
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if self._state.muted and isinstance(frame, (LLMTextFrame, TTSSpeakFrame)):
+            return
+        await self.push_frame(frame, direction)
+
+
+IDLE_CHECK_SECS = 30  # rep silent this long after we spoke -> one gentle check-in
+ANSWER_SILENCE_SECS = 8  # call answered but nobody speaks -> say "Hello?"
+HUMAN_FALLBACK_SECS = 2.5  # person spoke on menu/hold and the LLM didn't react -> code moves on
+
+
+async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str, call_sid: str,
+                           sample_rate: int | None = TWILIO_SAMPLE_RATE, kind: str = "live") -> None:
+    """The real call: Pipecat Flows stages driven by the CallState checklist."""
+    state = CallState(sc, call_sid=call_sid)
+    llm = make_llm()
+    context = LLMContext(messages=[])
+    aggregators = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(), user_idle_timeout=IDLE_CHECK_SECS,
+        ),
+    )
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        aggregators.user(),
+        llm,
+        SpeechGate(state),
+        tts,
+        transport.output(),
+        aggregators.assistant(),
+    ])
+    task = make_worker(pipeline, sample_rate)
+    flow_manager = FlowManager(worker=task, llm=llm, context_aggregator=aggregators)
+
+    async def send_dtmf(digits: str) -> None:
+        logger.info(f"DTMF -> {digits}")
+        await task.queue_frame(OutputDTMFFrame(buttons=[KeypadEntry(c) for c in digits]))
+
+    idle = {"prompted": False}
+
+    async def hello_if_silent():
+        # Someone picked up but nobody speaks: say hello once instead of dead air.
+        await asyncio.sleep(ANSWER_SILENCE_SECS)
+        if state.stage == "ivr" and not state.transcript:
+            logger.info("No speech after answer: saying hello")
+            await task.queue_frame(TTSSpeakFrame("Hello?"))
+
+    async def force_human_if_missed(digits_before: int):
+        # The LLM should call human_detected itself; if it hasn't shortly after a person
+        # spoke (or wrongly went on hold), the code does it, so the agent can never stay
+        # stuck on mute.
+        await asyncio.sleep(HUMAN_FALLBACK_SECS)
+        if state.stage not in ("ivr", "hold") or len(state.digits_sent) != digits_before:
+            return  # the LLM handled it
+        stage = state.stage
+        outcome = run_tool(state, "human_detected", {})
+        logger.warning(f"LLM missed a live person in stage {stage}: moving to {outcome.next_stage}")
+        if outcome.next_stage:
+            await flow_manager.set_node_from_config(build_node(state.stage, state, send_dtmf))
+
+    @transport.event_handler("on_client_connected")
+    async def on_connected(_transport, _client):
+        state.connected_at = time.time()
+        # Outbound: the phone system or the rep speaks first, so the first node waits.
+        await flow_manager.initialize(build_node("ivr", state, send_dtmf, first=True))
+        asyncio.create_task(hello_if_silent())
+
+    @aggregators.user().event_handler("on_user_turn_started")
+    async def on_user_started(_agg, _strategy):
+        idle["prompted"] = False
+
+    @aggregators.user().event_handler("on_user_turn_stopped")
+    async def on_user_stopped(_agg, _strategy, message):
+        text = message.content or ""
+        mid_call = state.resume_stage is not None
+        speaker = "ivr" if state.stage in ("ivr", "hold") and not mid_call else "rep"
+        state.add_turn(speaker, text)
+        if state.stage in ("ivr", "hold") and looks_like_person(text, mid_call=mid_call):
+            asyncio.create_task(force_human_if_missed(len(state.digits_sent)))
+
+    @aggregators.assistant().event_handler("on_assistant_turn_stopped")
+    async def on_assistant_stopped(_agg, message):
+        if not state.muted:
+            state.add_turn("agent", message.content or "")
+
+    @aggregators.user().event_handler("on_user_turn_idle")
+    async def on_idle(_agg):
+        # "Let me pull that up" can take a while; check in once, never hang up.
+        if state.stage in ("ivr", "hold", "end") or idle["prompted"]:
+            return
+        idle["prompted"] = True
+        await task.queue_frame(TTSSpeakFrame("I'm still here whenever you're ready."))
+
+    @transport.event_handler("on_client_disconnected")
+    async def on_disconnected(_transport, _client):
+        logger.info(f"Session {call_sid} disconnected at stage {state.stage}")
+        state.ended_reason = state.ended_reason or f"disconnected_during_{state.stage}"
+        await task.cancel()
+
+    await WorkerRunner(handle_sigint=False).run(task)
+    await finalize_call(state, kind=kind, scenario=scenario_name)

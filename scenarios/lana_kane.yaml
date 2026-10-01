@@ -1,0 +1,22 @@
+# Reference scenario from Amplify's sample call. All data is synthetic.
+practice:
+  name: Cedar Park Dental
+  city: Denver
+  provider_name: Dr. Alan Whitmore
+  tax_id: "84-1552037"
+  npi: "1477588213"
+  callback_phone: "303-555-0192"
+
+patient:
+  name: Lana Kane
+  dob: "1983-07-09"
+  member_id: MDB40719883
+  relationship: subscriber
+
+payer:
+  name: Meridian Dental Benefits
+  # Number to dial (E.164). Overridden by --to on the command line.
+  phone: ""
+
+objective:
+  codes: [D4341, D4342, D4910, D1110]

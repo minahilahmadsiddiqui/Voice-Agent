@@ -1,0 +1,21 @@
+{
+  "member": {"name": "Lana Kane", "dob": "1983-07-09", "member_id": "MDB40719883",
+             "subscriber": true, "active": true, "effective": "2024-03-01", "benefit_year": "calendar"},
+  "srp": {"codes": {"D4341": {"coverage_pct": 80}, "D4342": {"coverage_pct": 80}},
+          "class": "basic", "deductible": {"amount": 50, "met": true},
+          "annual_max": 1500, "remaining": 1247, "remaining_corrected_on_readback": true,
+          "frequency": "1 per quadrant / 24 months, date-of-service to date-of-service",
+          "quadrants_per_dos": 2,
+          "history": [{"quadrant": "UR", "code": "D4341", "paid": "2025-02-04", "next_eligible": "2027-02-04"},
+                      {"quadrant": "LR", "code": "D4341", "paid": "2025-02-04", "next_eligible": "2027-02-04"},
+                      {"quadrant": "UL", "code": null, "paid": null, "next_eligible": "now"},
+                      {"quadrant": "LL", "code": null, "paid": null, "next_eligible": "now"}],
+          "documentation": {"perio_charting": true, "radiographs": true, "min_pocket_depth_mm": 4,
+                            "bone_loss_required": true, "preauth": "recommended_not_required"},
+          "downgrade": {"to": "D1110", "trigger": "documentation_does_not_support_diagnosis"}},
+  "d4910": {"coverage_pct": 80, "frequency": "2 per calendar year, shared with D1110",
+            "wait_after_srp_days": 90},
+  "call": {"rep": "Denise Okafor", "reference": "771402988",
+           "disclaimer": "Benefits are subject to eligibility and plan limitations at the time of service.",
+           "source": "payer_rep_verbal"}
+}
