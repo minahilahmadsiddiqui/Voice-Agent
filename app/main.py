@@ -72,6 +72,34 @@ async def call_status(request: Request):
     return Response(status_code=204)
 
 
+def _call_dir(call_sid: str):
+    if call_sid == "latest":
+        dirs = [d for d in CALLS_DIR.glob("*") if d.is_dir() and (d / "reference.json").exists()]
+        if not dirs:
+            raise HTTPException(status_code=404, detail="no finished calls yet")
+        return max(dirs, key=lambda d: (d / "reference.json").stat().st_mtime)
+    d = CALLS_DIR / call_sid
+    if not (d / "reference.json").exists() or d.resolve().parent != CALLS_DIR.resolve():
+        raise HTTPException(status_code=404, detail="unknown call")
+    return d
+
+
+@app.get("/calls/{call_sid}")
+def call_result(call_sid: str):
+    """The structured result of a call (PDF shape). /calls/latest = the most recent one."""
+    d = _call_dir(call_sid)
+    return {"call": d.name, "reference": json.loads((d / "reference.json").read_text(encoding="utf-8")),
+            "discrepancies": json.loads((d / "discrepancies.json").read_text(encoding="utf-8"))}
+
+
+@app.get("/calls/{call_sid}/sourced")
+def call_sourced(call_sid: str):
+    """Every field with its status, the rep's exact words and the transcript turn."""
+    d = _call_dir(call_sid)
+    return {"call": d.name, "sourced": json.loads((d / "sourced.json").read_text(encoding="utf-8")),
+            "transcript": (d / "transcript.txt").read_text(encoding="utf-8").splitlines()}
+
+
 @app.post("/twilio/recording")
 async def recording_ready(request: Request):
     form = dict(await request.form())

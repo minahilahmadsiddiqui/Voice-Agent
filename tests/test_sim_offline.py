@@ -57,7 +57,7 @@ SCRIPT = [
     [tool("on_hold")],                                                       # please hold
     [text("Still waiting.")],                                                # hold music -> must be gated
     [tool("human_detected", rep_first_name="Denise")],                       # rep greets
-    [text("Hi Denise, this is an automated assistant calling on behalf of Cedar Park Dental.")],
+    # (introduction spoken by code: identity first, in the reference call's order)
     [tool("record_fields", fields=[f("member.active", True), f("member.effective", "2024-03-01"),
                                    f("member.benefit_year", "calendar")])],
     # from here on the CODE asks the next question (scripted from the checklist): no LLM call
@@ -66,7 +66,7 @@ SCRIPT = [
                                    f("srp.deductible.met", True), f("srp.annual_max", 1500),
                                    f("srp.remaining", 1340), f("srp.frequency", "1 per quadrant / 24 months"),
                                    f("srp.frequency_months", 24)])],
-    [text("Sure, take your time.")],                                         # rep: "let me look"
+    # (rep: "let me look" -> "Sure, take your time." is said by code, no LLM call)
     [tool("record_quadrant", quadrants=[
         {"quadrant": "UR", "on_file": True, "code": "D4341", "paid_date": "2025-02-04", "quote": "q"},
         {"quadrant": "LR", "on_file": True, "code": "D4341", "paid_date": "2025-02-04", "quote": "q"},
@@ -133,14 +133,15 @@ def test_scripted_call_through_text_agent(tmp_calls):
             turn = await agent.hear(line)
             spoken.append(turn.spoken)
         assert state.stage == "end" and state.ended_reason == "completed"
-        assert spoken[0].startswith("Hi Denise")          # human_detected -> verify speaks immediately
+        assert spoken[0].startswith("Hi Denise, this is Ava")  # scripted intro right after human_detected
+        assert "N P I" in spoken[0] and "tax ID" in spoken[0]
         assert spoken[3] == "Sure, take your time."        # no new question mid-lookup
         assert state.transcript[[t.text for t in state.transcript].index(REP_LINES[0])].speaker == "rep"
 
         # Every call after on_hold sees only the current stage's tools.
         tool_sets = [[t["name"] for t in c["tools"]] for c in client.calls]
         assert tool_sets[0] == ["press_digits", "on_hold", "human_detected"]
-        assert "record_quadrant" in tool_sets[9]
+        assert "record_quadrant" in tool_sets[8]
         assert spoken[1].startswith("Benefits for scaling and root planing")  # scripted by code
         assert spoken[2].startswith("Does claim history show SRP paid")
         assert spoken[6].startswith("Let me read this back")

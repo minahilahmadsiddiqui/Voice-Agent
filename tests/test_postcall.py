@@ -8,8 +8,9 @@ from app.state import CallState
 
 def _state():
     s = CallState(load_scenario("lana_kane"))
-    for i in range(10):
-        s.add_turn("rep", f"line {i}")
+    # Live quotes must be grounded in what the rep said, so the transcript ends with them.
+    for line in [f"line {i}" for i in range(7)] + ["Fifteen hundred", "1340", "Remaining is $1,247"]:
+        s.add_turn("rep", line)
     return s
 
 

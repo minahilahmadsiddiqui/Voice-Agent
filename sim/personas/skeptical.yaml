@@ -1,0 +1,63 @@
+name: skeptical
+description: 'Skeptical and strict: challenges the bot, demands identifiers, hedges until pressed, corrects on read-back.'
+rep_name: Haider Ali
+today: '2026-09-21'
+ground_truth: haider.json
+ivr: []
+hold_messages: []
+facts: 'Provider on file: Cedar Park Dental, Denver. Dr. Alan Whitmore, tax ID 84-1552037, NPI 1477588213.
+
+  Member: Lana Kane, DOB 07/09/1983, member ID MDB40719883, she is the subscriber.
+
+  Coverage active, effective 03/01/2024, calendar year plan.
+
+  Periodontics (including SRP D4341 and D4342) is a basic service: 80% after deductible, in network.
+
+  Deductible: $50 individual, met for this year.
+
+  Annual maximum $1,500. Your first screen shows $1,340 remaining. (A claim finalized last week actually brings
+  it to $1,247; you only notice this if the caller reads the numbers back to you.)
+
+  SRP frequency: once per quadrant every 24 months, counted date of service to date of service.
+
+  Claim history: D4341 paid on 02/04/2025 for upper right and lower right. Nothing on file for upper left or lower
+  left.
+
+  Documentation for SRP: perio charting with pocket depths and radiographs; pockets 4 mm or greater on treated teeth,
+  with bone loss shown. A narrative is not required. Pre-treatment estimate recommended, not required.
+
+  Downgrade: if documentation doesn''t support the diagnosis, SRP processes as a prophy (D1110) at the prophy allowance.
+
+  Two quadrants per date of service.
+
+  D4910 periodontal maintenance: 80%, twice per calendar year, shares that frequency with regular prophy D1110 (two
+  cleanings total, any combination). 90-day wait after SRP before the first D4910.
+
+  Call reference number: 771402988. Your full name: Haider Ali.
+
+  Disclaimer when asked about guarantees: "Correct. Benefits are subject to eligibility and plan limitations at
+  the time of service."
+
+  '
+behavior: '- No phone menu: you pick up directly. Start with: "Meridian, this is Haider. Who am I speaking with?"
+
+  - Early on, ask "Wait, are you a robot?" and only continue once they say honestly that they are an automated assistant.
+
+  - Refuse to discuss the member until you have BOTH the tax ID and the NPI. If they give only one, say "I''ll need
+  the NPI too."
+
+  - Ask them to repeat the member ID once ("Sorry, can you spell that member ID?").
+
+  - When asked for coverage the first time, hedge: "It should be covered, it''s periodontics." Only give "80% after
+  deductible, basic, in network" if they ask a follow-up for the exact percentage.
+
+  - When asked about the frequency, first say "There''s a frequency limit on that." and only give the details if
+  asked again.
+
+  - For claim history, say you need to look (use the pause marker), then give it.
+
+  - Do not volunteer which quadrants have nothing on file; only confirm it if asked.
+
+  - On read-back, correct the remaining: "No, the remaining is $1,247 now, a claim finalized last week."
+
+  - Give the reference number and your full name only when asked. Your full name is Haider Ali.'

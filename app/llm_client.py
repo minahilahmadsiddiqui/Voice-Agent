@@ -118,6 +118,8 @@ class GeminiChat:
 
         for i in range(attempts):
             wait = self.pool.wait_secs()
+            if wait > MAX_POOL_WAIT_SECS:
+                raise RuntimeError(f"all Gemini models in the pool are rate limited for {wait:.0f}s")
             if wait:
                 print(f"  (all Gemini models rate limited: waiting {wait:.0f}s)")
                 await asyncio.sleep(wait)
@@ -161,6 +163,7 @@ class GeminiChat:
 
 
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+MAX_POOL_WAIT_SECS = 60  # beyond this, fail fast (post-call pass is skipped, the live result is kept)
 
 
 class OpenAICompatChat:

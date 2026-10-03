@@ -54,6 +54,9 @@ class ModelPool:
         logger.warning(f"Model {model} unavailable ({why}), resting {secs:.0f}s; trying the next one")
 
 
+DAILY_LIMIT_REST_SECS = 15 * 60
+
+
 def _code(err: Exception) -> int | None:
     return getattr(err, "code", None) or getattr(err, "status_code", None)
 
@@ -67,6 +70,9 @@ def cooldown_secs(err: Exception) -> float:
     if _code(err) != 429:
         return 20.0  # overloaded: try again soon
     if "PerDay" in text:
-        return 6 * 3600.0  # daily quota used up
+        # Daily quota (probably) used up. Don't bench the model for hours on one error:
+        # retrying costs a single request, and benching our best model would push every
+        # turn onto slow fallbacks.
+        return DAILY_LIMIT_REST_SECS
     m = re.search(r"retry in ([\d.]+)s|'retryDelay': '(\d+)s'", text)
     return float(m.group(1) or m.group(2)) + 1 if m else 60.0

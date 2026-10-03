@@ -213,3 +213,38 @@ def test_scripted_questions_follow_the_checklist():
     assert "eligible again February fourth, twenty twenty-seven" in s.next_line()  # date math, confirmed
     s.stage = "close"
     assert s.next_line() == "Can I get a call reference number and your full name?"
+
+
+def test_malformed_tool_args_never_crash():
+    s = _state("benefits")
+    out = run_tool(s, "record_fields", {"fields": ["srp.annual_max=1500", {"path": "srp.remaining", "value": "1340",
+                                                                           "quote": "q"}]})
+    assert out.result["recorded"] == ["srp.remaining"] and out.result["errors"]
+    out = run_tool(s, "record_quadrant", {"quadrants": "UR paid"})
+    assert "errors" in out.result
+    out = run_tool(s, "readback_done", None)
+    assert out is not None
+
+
+def test_readback_is_spoken_once():
+    s = _state("readback")
+    assert s.next_line().startswith("Let me read this back")
+    assert s.next_line() is None  # after a correction the LLM confirms it; no full re-read
+
+
+def test_invented_quotes_are_rejected():
+    s = _state("verify")
+    s.add_turn("rep", "I have her. Is she covered for scaling and root planing?")
+    err = s.record("member.effective", "2024-01-01", "effective January first, twenty twenty-four")
+    assert err and "did not say" in err and s.value("member.effective") is None
+    s.add_turn("rep", "Coverage is effective March first 2024, calendar year plan.")
+    assert s.record("member.effective", "2024-03-01", "effective March first 2024") is None
+
+
+def test_hold_requests_are_recognised():
+    from app.callflow.tools import is_hold_request
+    for t in ["Let me put you on a brief hold while I pull that up.", "Can you hold for a moment?",
+              "Please hold.", "I'm going to place you on hold real quick."]:
+        assert is_hold_request(t), t
+    for t in ["Thanks for holding, I show D4341 paid 02/04/2025", "Is she covered?", "Let me look."]:
+        assert not is_hold_request(t), t

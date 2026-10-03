@@ -17,6 +17,8 @@ from app.eligibility import next_eligible
 from app.fields import FOLLOWUPS, QUADRANT_NAMES, QUADRANTS, QUESTIONS, SPECS, STAGES, FieldSpec, fields_for
 from app.schema import FieldStatus
 
+AGENT_NAME = "Ava"
+
 RESOLVED = {FieldStatus.ANSWERED, FieldStatus.REFUSED, FieldStatus.UNKNOWN,
             FieldStatus.CORRECTED, FieldStatus.PROVIDED}
 # Stages that collect fields, in call order. readback and close always run.
@@ -141,6 +143,14 @@ def _speak(spec: FieldSpec, value: Any) -> str:
     return str(value).replace("_", " ")
 
 
+_STOP = {"the", "and", "for", "that", "this", "with", "are", "was", "has", "have", "its", "it's", "you", "she",
+         "her", "our", "your", "but", "not", "any", "per", "they"}
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", (text or "").lower())
+
+
 def _unslash(text: str) -> str:
     """'1 per quadrant / 24 months' -> '1 per quadrant every 24 months' (TTS would say 'slash')."""
     return re.sub(r"\s*/\s*", " every ", text)
@@ -160,6 +170,8 @@ class CallState:
         self.member_not_found_count = 0
         self.rep_first_name: str | None = None
         self.readback_done = False
+        self.readback_spoken = False  # the scripted read-back is said once; corrections go through the LLM
+        self.intro_given = False  # the scripted introduction (practice, provider, tax ID, NPI, callback)
         self.resume_stage: str | None = None  # stage to return to after a mid-call hold
         self.asked_before_leaving = False  # rep wanted to go; we asked once for the reference
         self.hints: list[str] = []  # sanity checks for the agent, handed over in the next tool result
@@ -209,6 +221,10 @@ class CallState:
             value = coerce(spec, raw)
         except ValueError as e:
             return f"{path}: {e}"
+        if quote and not self.quote_is_grounded(quote):
+            self.log("quote_rejected", path=path, quote=quote)
+            return (f"{path}: the rep did not say {quote!r} (it is not in their recent words). Record only what "
+                    "the rep actually said, with their exact words. If you didn't hear it, ask them.")
         cap = self.values[path]
         changed = cap.status in RESOLVED and cap.value is not None and cap.value != value
         if changed:
@@ -243,6 +259,22 @@ class CallState:
             if path == "srp.annual_max" and (value % 50 or value > 5000):
                 return f"Annual maximum {value} is unusual. Confirm it (e.g. did they say fifteen hundred?)."
         return None
+
+    def quote_is_grounded(self, quote: str, recent: int = 4) -> bool:
+        """Is the quote really from the rep? Compares its words with the rep's last few turns.
+
+        The LLM can invent a plausible quote ("effective January first...") for a fact nobody
+        stated. A quote whose words mostly don't appear in what the rep said is rejected.
+        """
+        rep_text = " ".join(t.text for t in self.transcript if t.speaker == "rep")
+        if not rep_text:
+            return True  # nothing to check against (e.g. unit tests without a transcript)
+        recent_text = " ".join([t.text for t in self.transcript if t.speaker == "rep"][-recent:])
+        words = [w for w in _words(quote) if len(w) >= 3 and w not in _STOP]
+        if len(words) < 2:
+            return True  # too short to judge ("yes", "two")
+        heard = set(_words(recent_text))
+        return sum(w in heard for w in words) / len(words) >= 0.5
 
     def mark(self, path: str, status: FieldStatus, quote: str | None = None) -> str | None:
         if path.startswith("srp.history."):
@@ -370,8 +402,16 @@ class CallState:
             return None
         if stage == "history":
             return self._history_line(missing)
+        if stage == "verify":
+            if self.intro_given:
+                return None  # member details / questions: the LLM answers what the rep asks
+            self.intro_given = True
+            return self.intro_line()
         if stage == "readback":
-            return None if self.readback_done else self.readback_script()
+            if self.readback_done or self.readback_spoken:
+                return None
+            self.readback_spoken = True
+            return self.readback_script()
         if stage == "close":
             if "call.reference" in missing:
                 return ("Can I get a call reference number and your full name?" if "call.rep" in missing
@@ -381,6 +421,14 @@ class CallState:
             if "call.disclaimer" in missing:
                 return "And to confirm for our file, this quote is not a guarantee of payment?"
         return None
+
+    def intro_line(self) -> str:
+        """Who we are, in the reference call's order: identity first, before anything is asked."""
+        pr = self.scenario.practice
+        hi = f"Hi {self.rep_first_name}" if self.rep_first_name else "Hi"
+        return (f"{hi}, this is {AGENT_NAME}, an automated assistant calling on behalf of {pr.name} in {pr.city}. "
+                f"The provider is {pr.provider_name}, tax ID {sf.spell_digits(pr.tax_id)}, "
+                f"N P I {sf.spell_digits(pr.npi)}. Callback is {sf.phone_number(pr.callback_phone)}.")
 
     def _history_line(self, missing: set[str]) -> str | None:
         open_q = [q for q in QUADRANTS if f"srp.history.{q}" in missing]

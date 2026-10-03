@@ -2,11 +2,11 @@
 
 An outbound voice agent that phones a dental insurance rep, verifies the practice and patient, and comes back with a structured, sourced record of Scaling and Root Planing (SRP) benefits.
 
-- What we're solving: [PROBLEM_STATEMENT.md](PROBLEM_STATEMENT.md)
-- How it's built: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)
-- Schedule: [6_DAY_PLAN.md](6_DAY_PLAN.md) · Decisions: [docs/DECISION_LOG.md](docs/DECISION_LOG.md)
+- **Design (1 page): [docs/DESIGN.md](docs/DESIGN.md)** · Decisions with evidence: [docs/DECISION_LOG.md](docs/DECISION_LOG.md)
+- What we're solving: [PROBLEM_STATEMENT.md](PROBLEM_STATEMENT.md) · Demo steps: [docs/DEMO_RUNBOOK.md](docs/DEMO_RUNBOOK.md)
+- Original plans (historical): [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md), [6_DAY_PLAN.md](6_DAY_PLAN.md)
 
-**Stack:** Pipecat 1.12 (+ Flows) · Deepgram Nova-3 (ears) + Aura (mouth) · Gemini free tier *or* Claude (brain, one setting) · Twilio (phone calls only) · FastAPI · Pydantic · SQLite
+**Stack (all free tiers):** Pipecat 1.12 (+ Flows) · Deepgram Nova-3 (ears) + Aura-2 (mouth) · Gemini Flash-Lite model pool (brain; Groq or Claude are one setting) · Twilio (phone calls only) · FastAPI · Pydantic · SQLite
 
 ## Free setup: two keys, no phone needed
 
@@ -14,6 +14,7 @@ An outbound voice agent that phones a dental insurance rep, verifies the practic
 |---|---|---|
 | `GOOGLE_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → Get API key | Free tier |
 | `DEEPGRAM_API_KEY` | [console.deepgram.com](https://console.deepgram.com) → API Keys | Free starting credit (covers both ears and mouth) |
+| `GROQ_API_KEY` (optional) | [console.groq.com](https://console.groq.com/keys) | Free; plays the simulated rep so tests don't use the agent's Gemini quota |
 
 With just these two you can:
 - **Talk to the agent in your browser:** run `python -m app.main`, open http://localhost:8765/client/, click Connect, and play the insurance rep.
@@ -25,13 +26,14 @@ Twilio is only needed to place real phone calls. Its free trial works for calls 
 
 ## How it works
 
-1. **A checklist in code drives the call.** `app/fields.py` lists every field the call has to resolve. `CallState` tracks each one's value, status, the rep's exact words and the transcript turn it came from. The LLM talks; the code decides what's missing and when to move on.
+1. **The LLM listens, the code drives.** `app/fields.py` lists every field the call has to resolve and the question for it. `CallState` tracks each one's value, status, the rep's exact words and the transcript turn. The LLM understands the rep and records facts through tools; the **code** picks the stage and speaks the next question, the introduction and the read-back (one LLM call per turn, and the order can't drift).
 2. **Stages** (`app/callflow/`): phone menu → hold → verify → benefits → claim history by quadrant → rules → D4910 → read-back → close. Each stage has a short prompt listing what's already captured and what's still missing, plus only the tools that stage needs.
-3. **Nothing is guessed.** Facts go in only through tools, with a quote. Anything unanswered comes out as an explicit `null`.
+3. **Nothing is guessed.** Facts go in only through tools, with a quote, and the quote must appear in what the rep actually said (`CallState.quote_is_grounded`). Odd numbers (8%, cents, remaining > max) must be confirmed with the rep. Anything unanswered comes out as an explicit `null` with a reason.
 4. **Code does the maths.** Next-eligible dates are computed in code, then confirmed with the rep. The read-back is generated from the state, not from the LLM's memory.
-5. **Hold-proof.** A `SpeechGate` drops anything the LLM tries to say on hold, and Pipecat's 5-minute idle hang-up is raised to 30 minutes.
-6. **After the call,** a stronger model re-reads the transcript and reconciles with the live capture. Read-back corrections win, and conflicts are flagged `needs_review`.
-7. **Two outputs:** `reference.json` is in exactly the shape of Amplify's reference PDF; `sourced.json` has every field with its status, quote and turn.
+5. **Hold-proof and phone-polite.** A `SpeechGate` drops anything the LLM tries to say on hold; Pipecat's 5-minute idle hang-up is raised to 30 minutes. "Let me look" gets an instant "Sure, take your time." from code; "let me put you on hold" mutes the agent until the rep is back. Only 2+ real words interrupt the agent, and a noise never makes it say "please repeat".
+6. **Free-tier proof.** The brain is a pool of Gemini models, each with its own free limit; a rate-limited, overloaded or slow (no first token in 2.5 s) model is skipped inside the same turn. A short "Got it." covers slow replies and a watchdog asks the next question if the LLM returns nothing.
+7. **After the call,** a second model pass re-reads the transcript and reconciles with the live capture. Read-back corrections win, and conflicts are flagged `needs_review`.
+8. **Two outputs:** `reference.json` is in exactly the shape of Amplify's reference PDF; `sourced.json` has every field with its status, quote and turn.
 
 The brain (`app/callflow/tools.py`, `prompts.py`, `app/state.py`) knows nothing about audio. The same code runs on a live call (through the Pipecat Flows adapter in `nodes.py`) and in the text simulator (`sim/`), so the tests exercise exactly what runs on the phone.
 
@@ -61,6 +63,8 @@ The agent waits for you to speak first, just as on a phone call. Start with a ph
 .\.venv\Scripts\python.exe -m sim.run --agent-model claude-haiku-4-5-20251001 --no-postcall
 ```
 
+Personas: `cooperative` (the PDF call), `skeptical` (robot question, demands tax ID + NPI, hedges), `rushed` (batched, out-of-order answers, tries to end early), `hold_and_fix` (mid-call hold, wrong quadrant then corrected). With a Groq key the simulated rep runs on Groq (`--rep-model qwen/qwen3.8-27b` plays the rep most reliably), so it doesn't use the agent's Gemini quota.
+
 The simulator plays a scripted phone menu and hold queue, then an LLM plays the rep from `sim/personas/<name>.yaml`. The scorecard compares the output with `sim/ground_truth/` field by field. It also checks behaviour: menu navigation, silence on hold, no new questions during "let me look" pauses, read-back done, and call completed. It reports accuracy both before and after the post-call pass.
 
 ## Place a real call
@@ -68,8 +72,8 @@ The simulator plays a scripted phone menu and hold queue, then an LLM plays the 
 Three terminals:
 
 ```powershell
-# 1. Tunnel so Twilio can reach your machine; copy the https URL into PUBLIC_URL in .env
-ngrok http 8765
+# 1. Tunnel so Twilio can reach your machine (free static domain = PUBLIC_URL in .env)
+ngrok http 8765 --url=https://YOUR-DOMAIN.ngrok-free.app
 
 # 2. The server
 .\.venv\Scripts\python.exe -m app.main
@@ -111,7 +115,8 @@ Each call (live or simulated) writes `calls/<CallSid>/`:
 | `events.json` | Stage changes, tool calls and timings |
 | `score.json` | Simulator only: scorecard and behaviour checks |
 
-Everything also goes into `calls/calls.db` (SQLite: `calls`, `fields`, `turns`).
+Everything also goes into `calls/calls.db` (SQLite: `calls`, `fields`, `turns`). While the server runs,
+**http://localhost:8765/calls/latest** shows the latest result and `/calls/latest/sourced` every field with its quote plus the transcript.
 
 ## Layout
 
@@ -124,7 +129,9 @@ app/
     prompts.py      Role prompt + per-stage task prompts built from the state
     nodes.py        Pipecat Flows adapter (live calls)
   pipeline.py       Pipecat pipeline per call (verify + test modes), SpeechGate
-  postcall.py       Transcript re-extraction (Opus) + reconciliation
+  postcall.py       Transcript re-extraction (second model pass) + reconciliation
+  model_pool.py     Free-tier model pool: rest a model on 429/503, pick the next
+  gemini_pool_llm.py  Pipecat Gemini service backed by the pool (switches inside a turn)
   export.py         reference.json (PDF shape) + sourced.json
   results.py        End-of-call: post-call pass, files, database
   storage.py        SQLite
@@ -137,5 +144,6 @@ app/
 sim/                Text-mode simulator: agent, rep, personas, ground truth, scorecard
 scenarios/          Practice + patient + payer details per call
 scripts/            CLI helpers
-tests/              31 unit tests, incl. a replay of the reference call that must reproduce the PDF's JSON exactly
+tests/              64 unit tests, incl. a replay of the reference call that must reproduce the PDF's JSON exactly
+docs/               Design, decision log, demo runbook, interview prep, simple explanations (00_*)
 ```

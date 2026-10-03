@@ -61,7 +61,7 @@ from app import speech_format as sf
 from app.callflow.nodes import build_node, enter_stage
 from app.gemini_pool_llm import PooledGoogleLLMService
 from app.model_pool import ModelPool, parse_pool
-from app.callflow.tools import is_stall, looks_like_person, run_tool
+from app.callflow.tools import is_hold_request, is_stall, looks_like_person, run_tool
 from app.config import CALLS_DIR, Scenario, groq_reasoning, load_scenario, settings
 from app.results import finalize_call
 from app.state import CallState
@@ -351,14 +351,21 @@ class StallAck(FrameProcessor):
     a second, so the rep hears dead air. Sits between STT and the user aggregator.
     """
 
-    def __init__(self, state: CallState, speak):
+    def __init__(self, state: CallState, speak, go_on_hold=None):
         super().__init__()
         self._state = state
         self._speak = speak  # SpeechGate.speak: straight to the voice
+        self._go_on_hold = go_on_hold  # switches the call to the hold stage (mute until they're back)
         self._last_ack = 0.0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        if (isinstance(frame, TranscriptionFrame) and self._go_on_hold
+                and self._state.stage not in ("ivr", "hold", "end") and is_hold_request(frame.text)):
+            self._state.add_turn("rep", frame.text)
+            await self._speak("Sure, I'll hold.")
+            await self._go_on_hold()
+            return
         if (isinstance(frame, TranscriptionFrame) and self._state.stage not in ("ivr", "hold", "end")
                 and is_stall(frame.text)):
             self._state.add_turn("rep", frame.text)
@@ -379,6 +386,7 @@ RESUME_AFTER_NOISE = (
 IDLE_CHECK_SECS = 30  # rep silent this long after we spoke -> one gentle check-in
 FILLER_AFTER_SECS = 1.3  # no reply yet this long after the rep stopped -> "Got it."
 FILLER_GAP_SECS = 6  # at most one filler in this window
+WATCHDOG_SECS = 6  # still nothing said this long after the rep stopped -> code asks the next question
 FILLERS = ["Got it.", "Okay.", "Okay, thanks."]
 SMART_TURN_STOP_SECS = 1.5  # longest wait when the rep sounds unfinished (Pipecat default 3)
 ANSWER_SILENCE_SECS = 3  # call answered but nobody speaks -> say "Hello?"
@@ -407,10 +415,11 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         ),
     )
     gate = SpeechGate(state)
+    stall_ack = StallAck(state, gate.speak)
     pipeline = Pipeline([
         transport.input(),
         stt,
-        StallAck(state, gate.speak),
+        stall_ack,
         aggregators.user(),
         llm,
         gate,
@@ -425,6 +434,12 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         logger.info(f"DTMF -> {digits}")
         await task.queue_frame(OutputDTMFFrame(buttons=[KeypadEntry(c) for c in digits]))
 
+    async def go_on_hold() -> None:
+        run_tool(state, "on_hold", {})  # remembers the stage to come back to
+        await flow_manager.set_node_from_config(build_node("hold", state, send_dtmf, say=say))
+
+    stall_ack._go_on_hold = go_on_hold
+
     async def say(text: str) -> None:
         """The code speaks a scripted line (next question, read-back) - no LLM round trip."""
         if state.rep_stopped_at and not state.agent_reply:
@@ -433,6 +448,16 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         await gate.speak(text)
 
     last_filler = {"t": 0.0}
+
+    async def watchdog(stopped_at: float):
+        # Free LLMs sometimes return an empty reply. Never leave the rep in silence: if
+        # nothing was said, the code asks the next question on the checklist.
+        await asyncio.sleep(WATCHDOG_SECS)
+        if state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted:
+            line = state.next_line()
+            if line:
+                logger.warning("No reply from the LLM: asking the next question from code")
+                await say(line)
 
     async def filler_if_slow(stopped_at: float):
         # The free LLM sometimes takes seconds. Rather than dead air, acknowledge briefly.
@@ -462,7 +487,9 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         stage = state.stage
         outcome = run_tool(state, "human_detected", {})
         logger.warning(f"LLM missed a live person in stage {stage}: moving to {outcome.next_stage}")
-        if outcome.next_stage:
+        if outcome.next_stage and outcome.confirm:  # back from a mid-call hold: the LLM records + speaks
+            await flow_manager.set_node_from_config(build_node(state.stage, state, send_dtmf, say=say))
+        elif outcome.next_stage:
             await flow_manager.set_node_from_config(await enter_stage(state, send_dtmf, say))
 
     @transport.event_handler("on_client_connected")
@@ -486,9 +513,11 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         state.add_turn(speaker, text)
         if state.stage in ("ivr", "hold") and looks_like_person(text, mid_call=mid_call):
             asyncio.create_task(force_human_if_missed(len(state.digits_sent)))
-        elif (state.stage not in ("ivr", "hold", "end") and len(text.split()) >= 3
-              and not text.rstrip().endswith("?")):
-            asyncio.create_task(filler_if_slow(state.rep_stopped_at))
+        elif state.stage not in ("ivr", "hold", "end") and text.strip() and not is_stall(text):
+            # (an empty turn = a swallowed "let me look": we already said "take your time")
+            if len(text.split()) >= 3 and not text.rstrip().endswith("?"):
+                asyncio.create_task(filler_if_slow(state.rep_stopped_at))
+            asyncio.create_task(watchdog(state.rep_stopped_at))
 
     @aggregators.assistant().event_handler("on_assistant_turn_stopped")
     async def on_assistant_stopped(_agg, message):

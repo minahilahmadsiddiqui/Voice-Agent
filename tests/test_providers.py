@@ -63,3 +63,23 @@ def test_service_factories_build(monkeypatch):
     monkeypatch.setattr(settings, "tts_provider", "deepgram")
     assert type(pipeline.make_tts()).__name__ == "DeepgramTTSService"
     assert pipeline.make_stt(load_scenario("lana_kane")) is not None
+
+
+def test_results_endpoints(tmp_path, monkeypatch):
+    import json
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main
+
+    d = tmp_path / "web-1"
+    d.mkdir()
+    (d / "reference.json").write_text(json.dumps({"srp": {"remaining": 1247}}))
+    (d / "discrepancies.json").write_text("[]")
+    (d / "sourced.json").write_text("{}")
+    (d / "transcript.txt").write_text("[0] REP: hi\n")
+    monkeypatch.setattr(main, "CALLS_DIR", tmp_path)
+    c = TestClient(main.app)
+    assert c.get("/calls/latest").json()["reference"]["srp"]["remaining"] == 1247
+    assert c.get("/calls/web-1/sourced").json()["transcript"] == ["[0] REP: hi"]
+    assert c.get("/calls/..%2Fsecret").status_code == 404

@@ -51,6 +51,20 @@ One line per decision: what we chose, and the evidence behind it.
 | 2026-10-01 | Code-spoken lines (filler, stall ack, scripted questions) go straight to the voice from the SpeechGate, not the top of the pipeline | Voice test 3: a "Got it." queued at the top waited behind the LLM and played after the question |
 | 2026-10-01 | Filler at most once per 6 s and never for 1-2 word fragments | Voice test 3: "Got it. Got it." |
 | 2026-10-01 | Measured after the scripted-question change: reply gaps 1.0-2.4 s typical, 4.5 s worst (was 13-28 s) | server log, voice test 3 |
+| 2026-10-02 | 3 adversarial simulator personas: `skeptical` (robot question, demands tax ID + NPI, hedges), `rushed` (batched/out-of-order answers, tries to end early), `hold_and_fix` (mid-call hold, wrong quadrant then corrected) | Haider "will not make it easy"; test the tricks before he does |
+| 2026-10-02 | Tool arguments validated; a malformed item is skipped with an error for the LLM, and any tool exception is caught | Rushed sim crashed: the LLM sent a string where an object was expected. On a live call that would freeze the agent |
+| 2026-10-02 | Watchdog: nothing said 6 s after the rep stopped -> code asks the next question | Skeptical sim: the free LLM returned an empty reply and the call died in silence |
+| 2026-10-02 | Introduction scripted in code (practice, provider, tax ID, NPI, callback) | Skeptical sim: the LLM gave patient details before the identifiers; the reference call proves identity first |
+| 2026-10-02 | Read-back spoken once; corrections are confirmed by the LLM | Rushed sim: after a correction the whole read-back was read again |
+| 2026-10-02 | Every recorded quote must be grounded: at least half its words must appear in the rep's last 4 turns, or the value is rejected and the LLM must ask | Skeptical sim: the LLM saved effective date 2024-01-01 with an invented quote ("effective January first...") the rep never said. Prompts alone don't stop this; code does |
+| 2026-10-02 | Back from a mid-call hold, the LLM (not the scripted question) takes the turn, so an answer given on return is recorded | Hold sim: "Thanks for holding, I show D4341 paid..." was ignored and the agent asked its next question |
+| 2026-10-02 | No filler/watchdog after a swallowed "let me look" turn; the simulator mirrors StallAck | Skeptical sim: the watchdog re-asked the question while the rep was looking it up |
+| 2026-10-02 | Sim results after fixes: skeptical 42/43 (98%) | the one miss was the invented effective date, now blocked |
+| 2026-10-02 | "Let me put you on a brief hold" handled by code: "Sure, I'll hold." then mute until the rep is back | Hold sim: the LLM re-asked its question instead of going on hold |
+| 2026-10-02 | Sim results: hold_and_fix 43/43 (100%), skeptical 42/43 (98%), rushed full call completed | simulated reps with gpt-oss-120b sometimes hang up on their own; qwen3.8 plays the rep reliably |
+| 2026-10-02 | A "per day" 429 rests a model 15 min (was 6 h); a text-mode pool wait over 60 s fails fast (post-call pass skipped, live result kept) | Rushed sim: one 429 benched Flash-Lite for 6 h although its quota was fine minutes later, and the post-call pass waited forever |
+| 2026-10-02 | `/calls/latest` and `/calls/latest/sourced` show the result in the browser | For the demo: show the JSON right after hang-up |
+| 2026-10-02 | Final sim round: rushed 43/43 (100%); cooperative flawless through the reference-number question (simulated rep then hit Groq's 200k tokens/day limit) | Groq free tier also has a daily token cap: plan heavy sim runs across days |
 | _pending_ | Gemini vs Claude for the live call | Run the same personas on both once keys exist; keep the one with better field accuracy |
 | _pending_ | Cartesia voice | Day 1 TTS test: each voice reads tax ID, member ID, DOB over a real call (`--mode tts_test --voice <id>`) |
 | _pending_ | Live-call LLM | Day 3: 5 personas × 2 fast models |

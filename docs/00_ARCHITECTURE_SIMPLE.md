@@ -8,7 +8,7 @@ A voice agent is like a person on the phone. It needs **4 body parts**:
 |---|---|---|---|
 | 📞 **Phone line** | Makes the real call, carries the sound | **Twilio** | ✅ Free trial credit |
 | 👂 **Ears** | Turns Haider's voice into text | **Deepgram Nova-3** (Speech-to-Text) | ✅ Free credit on signup |
-| 🧠 **Brain** | Reads the text, decides what to say next | **Google Gemini** (LLM) | ✅ Free tier |
+| 🧠 **Brain** | Understands what Haider said and saves the facts | **Google Gemini Flash-Lite** (a pool of free models) | ✅ Free tier |
 | 👄 **Mouth** | Turns the agent's text into a voice | **Deepgram Aura-2** (Text-to-Speech) | ✅ Same free Deepgram credit |
 
 And one **🦴 skeleton** that connects them all in real time: **Pipecat** (free, open source).
@@ -67,7 +67,7 @@ And one **🦴 skeleton** that connects them all in real time: **Pipecat** (free
 4. **Deepgram** writes it as text.
 5. **Gemini** reads it and calls a **tool**: `record(deductible.amount = 50, met = true, quote = "Fifty dollars...")`.
 6. Our **code** saves it in the **checklist**, and sees what's still missing: *annual max*.
-7. Gemini writes the next question: *"And the annual maximum and remaining?"*
+7. The **code** picks the next question from its list: *"And the annual maximum, and how much is remaining?"* (no second AI call → faster)
 8. **Deepgram Aura** turns it into voice → Twilio → Haider hears it.
 
 ---
@@ -78,7 +78,8 @@ AI models sometimes **forget, skip, or make things up**. So we don't let the AI 
 
 - `app/fields.py` = the **list of every question** that must be answered.
 - `app/state.py` = the **checklist** that tracks each answer: value, status, Haider's exact words, which turn.
-- **The code decides** what's missing and when to move to the next stage. The AI just *talks*.
+- **The code decides** what's missing, moves to the next stage, and **asks the next question itself**. The AI just *listens and saves*. (Also: the code says the introduction and the read-back.)
+- Every saved quote is **checked against what Haider really said**. A made-up quote is rejected.
 - The AI can only save a fact by **calling a tool with a quote**. No quote → nothing saved.
 - Not answered → `null`. **Never guessed.**
 - **Date math** (next eligible 02/04/2027) is done **by code**, not the AI. AI is bad at math.
@@ -112,14 +113,15 @@ If Haider answers something early (e.g. gives the deductible while verifying), i
 | **ngrok** | Gives your laptop a public web address | Twilio is on the internet; your laptop is not. ngrok opens a safe tunnel | ✅ free account |
 | **Deepgram Nova-3** | Speech-to-Text (ears) | Very fast, good on phone audio, can be told special words ("D4341", "quadrant") | ✅ free signup credit |
 | **Deepgram Aura-2** | Text-to-Speech (mouth) | Fast, natural, uses the **same** free Deepgram credit — one key for ears + mouth | ✅ |
-| **Google Gemini (Flash)** | LLM (brain) | Fast, good at tool calling, **free tier** via AI Studio | ✅ free tier |
+| **Google Gemini Flash-Lite** (pool of 4 models) | LLM (brain) | Good at tool calling, **free tier**. Each model has its own limit (Flash-Lite 15/min; Flash only 20/day), so a pool switches model when one is busy or slow | ✅ free tier |
+| **Groq** (optional) | LLM that plays the fake Haider in tests | Free, very fast; keeps tests from using the agent's Gemini quota | ✅ free |
 | **Silero VAD** | Detects "someone is speaking" | Runs on your laptop, tiny, free. Stops music/silence being treated as words | ✅ local |
 | **Smart Turn** | Detects "he finished his sentence" | So "Let me look…" isn't treated as the end of his answer | ✅ local |
 | **FastAPI + Uvicorn** | Small web server | Twilio needs a web address to send audio to | ✅ |
 | **Pydantic** | Checks the JSON shape | Output is always valid and matches the PDF format | ✅ |
 | **SQLite** | Tiny database in one file | Stores every call's results, no setup | ✅ |
 | **pytest** | Runs automatic tests | Proves the code works after every change | ✅ |
-| **Text simulator** (`sim/`) | A fake Haider, played by Gemini, in text | Test 100 calls fast, without voice or phone costs | ✅ |
+| **Text simulator** (`sim/`) | A fake Haider (cooperative, skeptical, rushed, hold-and-fix), played by an AI, in text | Test 100 calls fast, without voice or phone costs | ✅ |
 | **Browser mode** | Talk to the agent in Chrome | Practise voice calls with **no phone and no Twilio** | ✅ |
 
 Optional, NOT needed (paid): Claude (brain), Cartesia (mouth). The code can switch to them with one setting, but we stay free.
@@ -160,4 +162,4 @@ A: Automatic tests (replays the PDF's call and must produce the PDF's exact JSON
 Trial limits to remember:
 - Twilio trial calls only **verified** numbers (Haider must verify his once).
 - Twilio trial plays a short "trial account" message first; Haider presses a key.
-- Gemini free tier has a per-minute request limit — fine for one call at a time.
+- Gemini free tier: Flash-Lite 15 requests/min; Flash models only 20/day. Limits reset at 12:00 noon Pakistan time. Don't burn them with many tests on demo morning.

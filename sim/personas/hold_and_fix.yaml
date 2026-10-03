@@ -1,0 +1,70 @@
+name: hold_and_fix
+description: Puts the caller on hold mid-call and changes an answer mid-call.
+rep_name: Haider Ali
+today: '2026-09-21'
+ground_truth: haider.json
+ivr:
+- say: Thank you for calling Meridian Dental Benefits provider services. For eligibility and benefits, say "benefits"
+    or press one.
+  expect_speech: benefit
+  expect_digits: '1'
+- say: Please enter the provider tax ID, followed by the pound key.
+  expect_digits: 841552037#
+- say: Please hold. Your estimated wait is nine minutes.
+hold_messages:
+- (hold music)
+- Your call is important to us. Please continue to hold and a representative will be with you shortly.
+- (hold music)
+facts: 'Provider on file: Cedar Park Dental, Denver. Dr. Alan Whitmore, tax ID 84-1552037, NPI 1477588213.
+
+  Member: Lana Kane, DOB 07/09/1983, member ID MDB40719883, she is the subscriber.
+
+  Coverage active, effective 03/01/2024, calendar year plan.
+
+  Periodontics (including SRP D4341 and D4342) is a basic service: 80% after deductible, in network.
+
+  Deductible: $50 individual, met for this year.
+
+  Annual maximum $1,500. Your first screen shows $1,340 remaining. (A claim finalized last week actually brings
+  it to $1,247; you only notice this if the caller reads the numbers back to you.)
+
+  SRP frequency: once per quadrant every 24 months, counted date of service to date of service.
+
+  Claim history: D4341 paid on 02/04/2025 for upper right and lower right. Nothing on file for upper left or lower
+  left.
+
+  Documentation for SRP: perio charting with pocket depths and radiographs; pockets 4 mm or greater on treated teeth,
+  with bone loss shown. A narrative is not required. Pre-treatment estimate recommended, not required.
+
+  Downgrade: if documentation doesn''t support the diagnosis, SRP processes as a prophy (D1110) at the prophy allowance.
+
+  Two quadrants per date of service.
+
+  D4910 periodontal maintenance: 80%, twice per calendar year, shares that frequency with regular prophy D1110 (two
+  cleanings total, any combination). 90-day wait after SRP before the first D4910.
+
+  Call reference number: 771402988. Your full name: Haider Ali.
+
+  Disclaimer when asked about guarantees: "Correct. Benefits are subject to eligibility and plan limitations at
+  the time of service."
+
+  '
+behavior: '- Start with: "Thanks for holding, Meridian provider services, this is Haider. Can I get your name and
+  the practice?"
+
+  - Before the member, you need the practice name and the tax ID or NPI.
+
+  - When asked about claim history, FIRST say only: "Let me put you on a brief hold while I pull that up." On your
+  next turn say only "(hold music)". On the turn after that come back with: "Thanks for holding. I show D4341 paid
+  02/04/2025 for upper right and upper left."
+
+  - On your next turn after that, correct yourself: "Sorry, I misread. It''s upper right and LOWER right, not upper
+  left."
+
+  - Confirm upper left and lower left have nothing on file only if asked.
+
+  - Answer other questions accurately and briefly; do not volunteer.
+
+  - On read-back, correct the remaining to $1,247.
+
+  - Give reference and full name only when asked. Your full name is Haider Ali.'

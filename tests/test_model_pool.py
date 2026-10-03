@@ -27,7 +27,7 @@ def test_pool_skips_resting_models():
 
 def test_cooldowns_and_thinking():
     assert 30 < cooldown_secs(_RateLimited("Please retry in 30s")) < 32
-    assert cooldown_secs(_RateLimited("quotaId GenerateRequestsPerDayPerProject")) >= 3600
+    assert 600 <= cooldown_secs(_RateLimited("quotaId GenerateRequestsPerDayPerProject")) <= 3600
     assert thinking_level("gemini-3.6-flash") == "minimal"
     assert thinking_level("gemini-3.8-flash") == "low"
     assert thinking_level("gemini-2.5-flash") is None

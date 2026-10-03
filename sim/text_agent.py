@@ -10,7 +10,8 @@ import time
 from dataclasses import dataclass, field
 
 from app.callflow.prompts import role_prompt, task_prompt
-from app.callflow.tools import RESPOND_ON_ENTER, STAGE_TOOLS, TOOLS, run_tool
+from app.callflow.tools import (RESPOND_ON_ENTER, STAGE_TOOLS, TOOLS, is_hold_request, is_stall,
+                                looks_like_person, run_tool)
 from app.state import CallState
 
 MAX_STEPS = 6  # LLM calls per agent turn (tool loops)
@@ -57,8 +58,37 @@ class TextAgent:
 
     async def hear(self, text: str) -> AgentTurn:
         """The other side said `text`; returns what the agent says/does in response."""
+        if self.state.stage not in ("ivr", "hold", "end") and is_hold_request(text):
+            # Same as the live StallAck: "Sure, I'll hold." then mute until the rep is back.
+            self._add_user([{"type": "text", "text": text}])
+            turn = AgentTurn()
+            self._say("Sure, I'll hold.", turn)
+            self.state.add_turn("agent", turn.spoken)
+            run_tool(self.state, "on_hold", {})
+            return turn
+        if self.state.stage not in ("ivr", "hold", "end") and is_stall(text):
+            # Same as the live StallAck: answered by code, the LLM doesn't run.
+            self._add_user([{"type": "text", "text": text}])
+            turn = AgentTurn()
+            self._say("Sure, take your time.", turn)
+            self.state.add_turn("agent", turn.spoken)
+            return turn
         self._add_user([{"type": "text", "text": text}])
-        return await self._respond()
+        turn = await self._respond()
+        # Same safety net as the live call (pipeline.force_human_if_missed): a person is
+        # talking but the LLM still thinks it's the phone menu / hold -> code moves on.
+        mid_call = self.state.resume_stage is not None
+        if self.state.stage in ("ivr", "hold") and not turn.digits and looks_like_person(text, mid_call=mid_call):
+            out = run_tool(self.state, "human_detected", {})
+            if out.confirm:  # back from a mid-call hold, maybe with an answer: the LLM handles it
+                more = await self._respond()
+                turn.spoken = f"{turn.spoken} {more.spoken}".strip()
+            else:
+                line = self.state.next_line()
+                if line:
+                    self._say(line, turn)
+                    self.state.add_turn("agent", line)
+        return turn
 
     async def _respond(self) -> AgentTurn:
         turn = AgentTurn()
@@ -119,6 +149,11 @@ class TextAgent:
             if line:
                 self._say(line, turn)  # scripted next question / read-back: no second LLM call
                 break
+        if not turn.spoken and not turn.digits and not self.state.muted \
+                and self.state.stage not in ("ivr", "hold", "end"):
+            line = self.state.next_line()  # same watchdog as the live call: never leave silence
+            if line:
+                self._say(line, turn)
         if turn.spoken:
             self.state.add_turn("agent", turn.spoken)
         return turn

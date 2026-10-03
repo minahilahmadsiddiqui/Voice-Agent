@@ -22,7 +22,7 @@ def _function(name: str, state: CallState, send_dtmf: SendDtmf, say: Say | None)
         if outcome.dtmf:
             await send_dtmf(outcome.dtmf)
         if outcome.confirm:
-            # A value looks misheard: the LLM must check it with the rep in its own words.
+            # A value looks misheard (or the rep is back from hold with news): the LLM speaks.
             nxt = build_node(state.stage, state, send_dtmf, say=say, scripted=False) if outcome.next_stage else None
             return outcome.result, nxt
         if outcome.next_stage or outcome.respond:

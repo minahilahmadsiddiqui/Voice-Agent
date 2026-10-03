@@ -41,14 +41,22 @@ Layer 3 knows **nothing about audio**. That's why the same brain runs on a phone
 | `app/gemini_pool_llm.py` | Plugs the pool into Pipecat, so the switch happens **inside the same turn** (no silence) |
 | `app/speech_format.py` | Turns data into speakable words: `84-1552037` → "eight four, one five five, two zero three seven"; `2027-02-04` → "February fourth, twenty twenty-seven"; `MDB...` → "M as in Mary, D as in David..." |
 
-`SpeechGate` (inside pipeline.py): while on hold, anything the AI tries to say is thrown away. A guarantee, not a hope.
+`SpeechGate` (inside pipeline.py): while on hold, anything the AI tries to say is thrown away. A guarantee, not a hope. It is also the "mouth door" the code uses to say its own lines instantly (`speak()`).
+
+Other helpers inside `pipeline.py`:
+- `StallAck` — hears "let me look" → says "Sure, take your time." at once (no AI call); hears "let me put you on hold" → "Sure, I'll hold." and mutes.
+- `say()` — the code speaks a scripted line (next question, intro, read-back).
+- `filler_if_slow()` — "Got it." if the reply takes over 1.3 s.
+- `watchdog()` — if nothing was said 6 s after Haider stopped, asks the next question.
+- `force_human_if_missed()` — a person is talking but the AI still thinks it's the phone menu → switch to talking.
+- `REPLY GAP` log lines — how long each reply took.
 
 ## Layer 3 — The brain logic (most important — know this well)
 
 | File | What it does |
 |---|---|
 | `app/fields.py` | **The question list.** Every field the call must answer: path (`srp.deductible.amount`), type (money/percent/date/yes-no), which stage asks it, and how to ask it. Change the list here → prompts, tools, read-back and scoring all follow |
-| `app/state.py` | **The checklist (CallState).** For each field: value, status (answered / refused / unknown / corrected / not_asked), the rep's exact quote, which transcript turn. Decides what's missing and the next stage. Converts "$1,340" → 1340, "03/01/2024" → a date. Builds the read-back script |
+| `app/state.py` | **The checklist (CallState).** For each field: value, status (answered / refused / unknown / corrected / not_asked), the rep's exact quote, which transcript turn. Decides what's missing and the next stage. Converts "$1,340" → 1340, "03/01/2024" → a date. `next_line()` = the next thing the code says (question, intro, read-back). `quote_is_grounded()` = rejects made-up quotes. `sanity_hint()` = flags odd numbers to confirm |
 | `app/eligibility.py` | **Date math in code:** paid 2025-02-04 + 24 months → eligible 2027-02-04 (or "now" if never paid / already passed) |
 | `app/callflow/tools.py` | **The only way the AI can change anything.** Tools: `press_digits`, `on_hold`, `human_detected`, `record_fields`, `record_quadrant`, `mark_unresolved`, `member_not_found`, `readback_done`, `end_call`. Each tool returns: result + next stage (decided by code) + speak now or stay quiet. Also says which stage gets which tools |
 | `app/callflow/prompts.py` | What we tell the AI: one **role prompt** (who you are, how to speak, never guess) + a short **stage prompt** (what's captured, what's still missing) |

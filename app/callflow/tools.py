@@ -88,6 +88,17 @@ _STALL = re.compile(
     r"\b[\s\w,.'…-]{0,30}$", re.I)
 
 
+_HOLD_REQUEST = re.compile(
+    r"\b(?:put|place) you on (?:a )?(?:brief |quick |short |real quick )?hold\b|\bplease hold\b|\bcan you hold\b"
+    r"|\bmind holding\b|\bbear with me while i\b", re.I)
+
+
+def is_hold_request(text: str) -> bool:
+    """The rep is putting us on hold mid-call ("let me put you on a brief hold")."""
+    text = (text or "").strip()
+    return bool(_HOLD_REQUEST.search(text)) and len(text.split()) <= 16 and not re.search(r"\d", text)
+
+
 def is_stall(text: str) -> bool:
     """The rep is pausing to look something up: say "take your time" at once, then wait."""
     text = (text or "").strip()
@@ -121,16 +132,33 @@ def human_detected(state: CallState, args: dict) -> Outcome:
     resume, state.resume_stage = state.resume_stage, None
     if resume is None:
         return Outcome({"ok": True, "rep_first_name": name}, next_stage="verify")
-    # Back from a mid-call hold: continue where we were (or the next open stage).
+    # Back from a mid-call hold: continue where we were (or the next open stage). The rep
+    # often comes back WITH the answer ("Thanks for holding, I show..."), so the LLM speaks
+    # (and records) instead of the code jumping to the next question.
     nxt = resume if not (resume in SKIPPABLE and state.stage_done(resume)) else state.next_stage(after=resume)
-    return Outcome({"ok": True, "note": "the rep is back; thank them briefly and continue"}, next_stage=nxt)
+    return Outcome({"ok": True, "note": "the rep is back. Record anything they just said, then continue."},
+                   next_stage=nxt, confirm=True)
 
 
 # ---------- recording ----------
 
+def _items(args: dict, key: str) -> tuple[list[dict], list[str]]:
+    """The list argument of a tool, keeping only well-formed items. LLMs sometimes send a
+    string or a bare value instead of an object; that must never crash the call."""
+    raw = args.get(key) or []
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return [], [f"{key} must be a list of objects"]
+    good = [i for i in raw if isinstance(i, dict)]
+    bad = [f"ignored malformed item {i!r}: each item must be an object" for i in raw if not isinstance(i, dict)]
+    return good, bad
+
+
 def record_fields(state: CallState, args: dict) -> Outcome:
-    recorded, errors = [], []
-    for item in args.get("fields") or []:
+    recorded = []
+    items, errors = _items(args, "fields")
+    for item in items:
         err = state.record(item.get("path", ""), item.get("value"), item.get("quote"))
         (errors if err else recorded).append(err or item.get("path"))
     result: dict[str, Any] = {"recorded": recorded}
@@ -146,8 +174,9 @@ def mark_unresolved(state: CallState, args: dict) -> Outcome:
 
 
 def record_quadrant(state: CallState, args: dict) -> Outcome:
-    recorded, errors, eligible = [], [], {}
-    for item in args.get("quadrants") or []:
+    recorded, eligible = [], {}
+    items, errors = _items(args, "quadrants")
+    for item in items:
         q = str(item.get("quadrant", "")).upper()
         err = state.record_quadrant(q, bool(item.get("on_file")), item.get("code"),
                                     item.get("paid_date"), item.get("quote"))
@@ -185,8 +214,9 @@ def member_not_found(state: CallState, args: dict) -> Outcome:
 
 
 def readback_done(state: CallState, args: dict) -> Outcome:
-    applied, errors = [], []
-    for item in args.get("corrections") or []:
+    applied = []
+    items, errors = _items(args, "corrections")
+    for item in items:
         err = state.correct(item.get("path", ""), item.get("value"), item.get("quote"))
         (errors if err else applied).append(err or item.get("path"))
     if errors:
@@ -279,7 +309,11 @@ RESPOND_ON_ENTER = {s: s not in ("ivr", "hold") for s in STAGE_TOOLS}
 def run_tool(state: CallState, name: str, args: dict) -> Outcome:
     if name not in STAGE_TOOLS.get(state.stage, []):
         return Outcome({"error": f"{name} is not available in stage {state.stage}"})
-    outcome = TOOLS[name].handler(state, args or {})
+    try:
+        outcome = TOOLS[name].handler(state, args if isinstance(args, dict) else {})
+    except Exception as e:  # noqa: BLE001 - a malformed tool call must never end the call
+        state.log("tool_error", tool=name, error=str(e))
+        return Outcome({"error": f"could not process {name}: {e}. Check the arguments and try again."})
     if state.hints:
         # Values that look misheard: the agent must confirm them before moving on.
         outcome.result["confirm_with_rep"] = state.hints

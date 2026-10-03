@@ -87,6 +87,8 @@ async def run_once(persona_name: str, scenario: str, agent_model: str, rep_model
     rep_text = await rep.say()
     for _ in range(MAX_REP_TURNS):
         hung_up = HANGUP in rep_text
+        if hung_up and state.stage not in ("end", "close"):
+            say("SIM", f"(the simulated rep hung up early during stage {state.stage})")
         parts = [p.strip() for p in rep_text.replace(HANGUP, "").split(PAUSE)]
         agent_said = []
         for i, part in enumerate(parts):

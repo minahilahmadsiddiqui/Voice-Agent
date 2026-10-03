@@ -6,9 +6,8 @@ what is already captured (never ask twice) and exactly what is still missing (in
 
 from app import speech_format as sf
 from app.fields import field_guide
-from app.state import CallState
+from app.state import AGENT_NAME, CallState
 
-AGENT_NAME = "Ava"
 
 
 def role_prompt(state: CallState) -> str:
@@ -42,7 +41,7 @@ def role_prompt(state: CallState) -> str:
 - If a tool result says you must confirm something ("confirm_with_rep"), do that in your own words.
 
 # How you record (this is the most important part)
-- Record every fact the moment the rep states it, with record_fields, using the rep's exact words as the quote. This includes facts the rep volunteers early or out of order.
+- Record every fact the moment the rep states it, with record_fields, using the rep's exact words as the quote. This includes facts the rep volunteers early or out of order: claim history mentioned early goes in record_quadrant right away, so it is never asked again.
 - Record only what the rep actually said. Never guess, infer, or fill in typical values.
 - If an answer is vague ("should be", "it depends"), ask one clarifying follow-up. If it is still unclear, or the rep refuses, call mark_unresolved.
 - If the rep changes an earlier answer, record the new value and confirm it back.
@@ -94,6 +93,16 @@ def _task_prompt(state: CallState, stage: str) -> str:
                 "When a live person greets you (\"thanks for holding, this is ...\"), call human_detected.")
         return ("STAGE: on hold. Say absolutely nothing. Music, silence, beeps and recorded messages get no reply.\n"
                 + back)
+    if stage == "verify" and state.intro_given:
+        return (
+            f"STAGE: verification. A live representative ({rep}) is on the line. You ALREADY introduced yourself "
+            "and gave the provider, tax ID, NPI and callback number; repeat any of them only if asked.\n"
+            "1. When they ask for the member: give name, date of birth, member ID, and the patient's relationship "
+            f"to the subscriber ({sc.patient.relationship}).\n"
+            "2. Record whether coverage is active, the effective date and the benefit year. "
+            "If they don't volunteer them, ask.\n"
+            "If they cannot find the member, call member_not_found.\n\n" + _checklist(state, stage)
+        )
     if stage == "verify":
         return (
             f"STAGE: verification. A live representative ({rep}) is on the line.\n"
