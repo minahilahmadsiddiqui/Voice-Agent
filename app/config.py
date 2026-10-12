@@ -31,7 +31,7 @@ class Settings(BaseModel):
     llm_provider: str = "google"  # groq | google | anthropic
     groq_api_key: str = ""
     groq_model: str = "qwen/qwen3.8-27b"  # live call + simulator agent (~0.3 s per reply, measured)
-    groq_sim_rep_model: str = "openai/gpt-oss-120b"  # a different model = its own rate limit
+    groq_sim_rep_model: str = "qwen/qwen3.8-27b"  # a different model = its own rate limit
     google_api_key: str = ""
     # Pools: comma-separated, tried in order; each model has its own free-tier limit, so when
     # one is rate limited the request moves to the next (app/model_pool.py).

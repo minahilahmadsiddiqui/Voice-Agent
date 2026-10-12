@@ -100,7 +100,7 @@ The files are also in `calls\web-<time>\` (`reference.json`, `sourced.json`, `tr
 2. **"Nothing is guessed."** Quotes must match what the rep said. Odd numbers get double-checked. Date maths is done in code. Then a read-back and a post-call reconcile.
 3. **"Built for a real phone line."** Menu + keypad, hold-proof, "let me look" handled instantly, never traps the rep. Only the audio channel is the browser today. The phone version (Twilio) is in the code and would plug in with a paid number.
 4. **"Zero cost, measured."** Free-tier limits measured and designed around (a pool of Gemini models, fallbacks, a filler line when it's slow).
-5. **"Tested adversarially."** 72 automated tests, plus a simulator with four rep personas. Latest runs: cooperative 100%, rushed 100%, hold-and-fix 100%, skeptical 95–100% of 43 fields.
+5. **"Tested adversarially."** 72 automated tests, plus a simulator with four rep personas. Latest runs: all four personas 100% of 43 fields (skeptical: 3 runs out of 3).
 
 ## If something goes wrong (stay calm, have a plan)
 
