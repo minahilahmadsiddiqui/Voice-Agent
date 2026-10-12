@@ -55,7 +55,6 @@ SCRIPT = [
     [text("Benefits.")],                                                     # IVR menu
     [tool("press_digits", digits="841552037#")],                             # tax ID
     [tool("on_hold")],                                                       # please hold
-    [text("Still waiting.")],                                                # hold music -> must be gated
     [tool("human_detected", rep_first_name="Denise")],                       # rep greets
     # (introduction spoken by code: identity first, in the reference call's order)
     [tool("record_fields", fields=[f("member.active", True), f("member.effective", "2024-03-01"),
@@ -125,7 +124,7 @@ def test_scripted_call_through_text_agent(tmp_calls):
         await agent.hear("Please hold.")
         assert state.stage == "hold"
         t = await agent.hear("(hold music)")
-        assert t.spoken == "" and t.suppressed == "Still waiting."  # gated on hold
+        assert t.spoken == "" and t.suppressed == ""  # hold music: the LLM is not even asked
 
         spoken = []
         for line in REP_LINES:

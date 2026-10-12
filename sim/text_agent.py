@@ -10,8 +10,8 @@ import time
 from dataclasses import dataclass, field
 
 from app.callflow.prompts import role_prompt, task_prompt
-from app.callflow.tools import (RESPOND_ON_ENTER, STAGE_TOOLS, TOOLS, is_hold_request, is_stall,
-                                looks_like_person, run_tool)
+from app.callflow.tools import (RESPOND_ON_ENTER, STAGE_TOOLS, TOOLS, is_hold_recording,
+                                is_hold_request, is_stall, looks_like_person, run_tool)
 from app.state import CallState
 
 MAX_STEPS = 6  # LLM calls per agent turn (tool loops)
@@ -73,6 +73,8 @@ class TextAgent:
             self._say("Sure, take your time.", turn)
             self.state.add_turn("agent", turn.spoken)
             return turn
+        if self.state.stage == "hold" and is_hold_recording(text):
+            return AgentTurn()  # same as the live StallAck: a hold message never wakes the LLM
         self._add_user([{"type": "text", "text": text}])
         turn = await self._respond()
         # Same safety net as the live call (pipeline.force_human_if_missed): a person is

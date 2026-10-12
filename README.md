@@ -53,7 +53,9 @@ copy .env.example .env      # then fill in the keys
 # open http://localhost:8765/client/  ->  Connect  ->  allow the microphone
 ```
 
-The agent waits for you to speak first, just as on a phone call. Start with a phone-menu line ("For benefits, say benefits or press one") or go straight to the rep ("Thanks for holding, this is Denise, can I get your name and the practice?"). Results are saved to `calls/web-<timestamp>/` when you disconnect. Use headphones so the agent doesn't hear itself.
+The agent waits for you to speak first, just as on a phone call. Start with a phone-menu line ("For benefits, say benefits or press one") or go straight to the rep ("Thanks for holding, this is Denise, can I get your name and the practice?"). Results are saved to `calls/web-<timestamp>/` when you disconnect.
+
+**Live view:** open http://localhost:8765/live in a second tab (or share it on screen). While the call runs it shows the transcript, each checklist field turning green with the rep's exact words and turn number, and what is still to ask. When the call ends it shows the final `reference.json` and why each empty field is empty. Use headphones so the agent doesn't hear itself.
 
 ## Test in text mode (needs the LLM key only)
 
@@ -140,6 +142,7 @@ app/
   schema.py         Pydantic output model
   telephony.py      Twilio outbound call + TwiML
   ivr_test.py       Fake payer phone menu for testing
+  live.py           Live view (/live): transcript, checklist and final JSON while a call runs
   main.py           FastAPI: /call, /ws (Twilio media), /twilio/* callbacks, /ivr/*
 sim/                Text-mode simulator: agent, rep, personas, ground truth, scorecard
 scenarios/          Practice + patient + payer details per call

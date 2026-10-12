@@ -15,7 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import RedirectResponse, Response
 from loguru import logger
 from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.connection import IceServer, SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
     IceCandidate,
     SmallWebRTCPatchRequest,
@@ -28,7 +28,9 @@ from app.config import settings
 from app.pipeline import run_session
 
 router = APIRouter()
-_handler = SmallWebRTCRequestHandler()
+# The server gathers its own addresses through the same STUN/TURN servers as the browser;
+# without them it only knows its private LAN address, which a remote browser can't reach.
+_handler = SmallWebRTCRequestHandler(ice_servers=[IceServer(**s) for s in settings.ice_servers()])
 
 
 async def _run(connection: SmallWebRTCConnection) -> None:
@@ -75,7 +77,7 @@ async def start():
     session_id = str(uuid.uuid4())
     _sessions.add(session_id)
     return {"sessionId": session_id,
-            "iceConfig": {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}}
+            "iceConfig": {"iceServers": settings.ice_servers()}}
 
 
 @router.api_route("/sessions/{session_id}/api/offer", methods=["POST", "PATCH"])

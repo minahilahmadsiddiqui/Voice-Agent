@@ -16,6 +16,7 @@ from app.browser import mount_ui
 from app.browser import router as browser_router
 from app.config import CALLS_DIR, settings
 from app.ivr_test import router as ivr_router
+from app.live import router as live_router
 from app.pipeline import run_call
 from app.storage import set_recording
 from app.telephony import start_call
@@ -23,6 +24,7 @@ from app.telephony import start_call
 app = FastAPI(title="SRP Voice Agent")
 app.include_router(ivr_router)
 app.include_router(browser_router)
+app.include_router(live_router)
 mount_ui(app)
 
 
@@ -38,6 +40,7 @@ def health():
     return {
         "ok": True,
         "browser": "/client/",
+        "live": "/live",
         "llm": f"{settings.llm_provider}:{settings.model_for('agent')}",
         "tts": settings.tts_provider,
         "missing_keys": settings.missing_for_voice(),
@@ -113,5 +116,6 @@ async def recording_ready(request: Request):
 
 
 if __name__ == "__main__":
-    print(f"\n  Browser mode: http://localhost:{settings.port}/client/\n")
+    print(f"\n  Browser mode: http://localhost:{settings.port}/client/"
+          f"\n  Live view:    http://localhost:{settings.port}/live\n")
     uvicorn.run(app, host="0.0.0.0", port=settings.port)

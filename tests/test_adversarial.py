@@ -248,3 +248,54 @@ def test_hold_requests_are_recognised():
         assert is_hold_request(t), t
     for t in ["Thanks for holding, I show D4341 paid 02/04/2025", "Is she covered?", "Let me look."]:
         assert not is_hold_request(t), t
+
+
+def test_hold_messages_never_reach_the_llm_but_people_do():
+    from app.callflow.tools import is_hold_recording
+    for t in ["(hold music)", "[music]", "♪ ♪", "Your call is important to us. Please continue to hold.",
+              "Your estimated wait is nine minutes.", "Calls may be recorded for quality purposes."]:
+        assert is_hold_recording(t), t
+    for t in ["Thanks for holding, this is Haider.", "Hi, provider services.", "Hello?",
+              "Okay so I show D4341 paid on 02/04/2025.", "Are you still there?",
+              "Thanks for holding, this is Denise, calls may be recorded.", "Music to my ears, who's calling?"]:
+        assert not is_hold_recording(t), t
+
+
+def test_text_agent_stays_silent_on_hold_without_asking_the_llm():
+    import asyncio
+
+    from sim.text_agent import TextAgent
+
+    class NoLLM:
+        async def create(self, **kwargs):
+            raise AssertionError("the LLM must not run on a hold message")
+
+    s = _state("hold")
+    agent = TextAgent(s, NoLLM())
+    for msg in ["(hold music)", "Your call is important to us. Please continue to hold."]:
+        turn = asyncio.run(agent.hear(msg))
+        assert not turn.spoken and not turn.suppressed and s.stage == "hold"
+
+
+def test_quadrant_code_taken_from_reps_words_when_llm_leaves_it_out():
+    s = _state("history")
+    s.add_turn("rep", "I show D4341 paid on 02/04/2025 for upper right and lower right.")
+    run_tool(s, "record_quadrant", {"quadrants": [
+        {"quadrant": "UR", "on_file": True, "paid_date": "2025-02-04"}]})
+    assert s.quadrants["UR"].code == "D4341"
+    s.add_turn("rep", "Upper left had D4341 and D4342 on the same day, 01/10/2025.")
+    run_tool(s, "record_quadrant", {"quadrants": [
+        {"quadrant": "UL", "on_file": True, "paid_date": "2025-01-10"}]})
+    assert s.quadrants["UL"].code is None  # two codes said: never guess
+
+
+def test_vague_answer_gets_one_follow_up_before_unknown():
+    s = _state("benefits")
+    s.add_turn("rep", "It should be covered, it's periodontics.")
+    out = run_tool(s, "mark_unresolved", {"path": "srp.codes.D4341.coverage_pct"})
+    assert out.confirm and s.values["srp.codes.D4341.coverage_pct"].status != FieldStatus.UNKNOWN
+    s.add_turn("rep", "I really can't see the percentage.")
+    run_tool(s, "mark_unresolved", {"path": "srp.codes.D4341.coverage_pct"})
+    assert s.values["srp.codes.D4341.coverage_pct"].status == FieldStatus.UNKNOWN
+    run_tool(s, "mark_unresolved", {"path": "srp.annual_max", "status": "refused"})
+    assert s.values["srp.annual_max"].status == FieldStatus.REFUSED  # a refusal is final at once

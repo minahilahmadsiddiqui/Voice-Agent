@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRP Verification Live</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14171c; --muted: #646b78; --line: #e3e6eb;
+    --accent: #2f6fed; --accent-soft: #e8efff;
+    --ok: #12805c; --ok-soft: #e3f5ed; --warn: #b25e09; --warn-soft: #fdf1e2;
+    --bad: #c03538; --bad-soft: #fbe9e9; --pending: #a2a8b3;
+    --rep: #eef1f5; --agent: #e8efff; --ivr: #f3eefb;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --ink: #e8ebf0; --muted: #98a0ad; --line: #272d36;
+      --accent: #6b9bff; --accent-soft: #1b2741;
+      --ok: #3fc48f; --ok-soft: #12291f; --warn: #f0a24b; --warn-soft: #2e2214;
+      --bad: #f07174; --bad-soft: #2e1718; --pending: #5d6571;
+      --rep: #1e232b; --agent: #1b2741; --ivr: #251f33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 "Segoe UI", system-ui, -apple-system, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--line);
+           padding: 14px 24px 12px; }
+  .top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
+          font-size: 12.5px; font-weight: 600; background: var(--line); color: var(--muted); }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .pill.live { background: var(--bad-soft); color: var(--bad); }
+  .pill.live .dot { animation: pulse 1.2s infinite; }
+  .pill.finalizing { background: var(--warn-soft); color: var(--warn); }
+  .pill.done { background: var(--ok-soft); color: var(--ok); }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .spacer { flex: 1; }
+  .stat { text-align: right; }
+  .stat b { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .stat span { display: block; color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+  .progress { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 12px; }
+  .progress div { height: 100%; background: var(--ok); width: 0; transition: width .5s; }
+  .stages { display: flex; gap: 4px; margin-top: 10px; overflow-x: auto; }
+  .stages span { flex: 1; min-width: 64px; text-align: center; font-size: 11.5px; padding: 4px 6px; border-radius: 6px;
+                 color: var(--muted); background: var(--bg); white-space: nowrap; }
+  .stages span.past { color: var(--ok); }
+  .stages span.now { background: var(--accent); color: #fff; font-weight: 600; }
+
+  main { display: grid; grid-template-columns: minmax(320px, 5fr) 7fr; gap: 20px; padding: 20px 24px 40px;
+         max-width: 1500px; margin: 0 auto; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+  .card > h2 { margin: 0; padding: 12px 16px; font-size: 13px; font-weight: 650; text-transform: uppercase;
+               letter-spacing: .05em; color: var(--muted); border-bottom: 1px solid var(--line);
+               display: flex; justify-content: space-between; align-items: center; }
+
+  #transcript-card { position: sticky; top: 140px; height: calc(100vh - 170px); display: flex; flex-direction: column; }
+  #transcript { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .turn { max-width: 88%; }
+  .turn .who { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+  .turn .who i { font-style: normal; font-family: var(--mono); opacity: .7; }
+  .turn .bubble { padding: 8px 12px; border-radius: 12px; background: var(--rep); }
+  .turn.agent { align-self: flex-end; }
+  .turn.agent .who { text-align: right; }
+  .turn.agent .bubble { background: var(--agent); }
+  .turn.ivr .bubble { background: var(--ivr); }
+  .turn.flash .bubble { outline: 2px solid var(--accent); }
+  .turn.cited .bubble { box-shadow: inset 3px 0 0 var(--ok); }
+
+  .right { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  #missing { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 4px 10px; border-radius: 999px; font-size: 12.5px; background: var(--bg);
+          border: 1px solid var(--line); color: var(--muted); }
+  .chip.current { background: var(--accent-soft); border-color: transparent; color: var(--accent); font-weight: 600; }
+  .empty { color: var(--muted); padding: 12px 16px; }
+
+  .group h3 { margin: 0; padding: 10px 16px 6px; font-size: 12.5px; color: var(--muted); font-weight: 650; }
+  .group h3 small { font-weight: 500; margin-left: 6px; }
+  .row { display: grid; grid-template-columns: 18px minmax(150px, 2fr) 3fr; gap: 10px; padding: 8px 16px;
+         border-top: 1px solid var(--line); align-items: start; transition: background 1.5s; }
+  .row.flash { background: var(--ok-soft); transition: none; }
+  .mark { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--pending); margin-top: 3px;
+          display: grid; place-items: center; font-size: 9px; font-weight: 800; color: #fff; }
+  .row.answered .mark, .row.provided .mark { background: var(--ok); border-color: var(--ok); }
+  .row.corrected_on_readback .mark { background: var(--accent); border-color: var(--accent); }
+  .row.refused .mark, .row.unknown .mark, .row.not_asked .mark { background: var(--pending); border-color: var(--pending); }
+  .row.needs_review .mark { background: var(--warn); border-color: var(--warn); }
+  .row .label { font-weight: 550; }
+  .row .label .opt { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .row .val { font-weight: 650; }
+  .row.pending .val { color: var(--pending); font-weight: 400; }
+  .row .val s { color: var(--muted); font-weight: 400; margin-right: 6px; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+         margin-left: 6px; vertical-align: 1px; }
+  .tag.corrected_on_readback { background: var(--accent-soft); color: var(--accent); }
+  .tag.needs_review { background: var(--warn-soft); color: var(--warn); }
+  .tag.refused, .tag.unknown, .tag.not_asked { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+  .tag.postcall { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+  .quote { color: var(--muted); font-style: italic; margin-top: 2px; font-size: 13px; }
+  .quote a { font-style: normal; font-family: var(--mono); font-size: 11.5px; color: var(--accent);
+             text-decoration: none; margin-left: 4px; cursor: pointer; }
+
+  #result-card { display: none; }
+  #result-card.show { display: block; }
+  .result-body { padding: 14px 16px; display: grid; gap: 14px; }
+  .nulls { display: grid; gap: 6px; }
+  .null { padding: 8px 12px; border-radius: 8px; background: var(--bg); }
+  .null b { font-family: var(--mono); font-size: 12.5px; }
+  .null div { color: var(--muted); font-size: 13px; }
+  pre { margin: 0; padding: 14px; border-radius: 8px; background: var(--bg); overflow: auto; max-height: 520px;
+        font: 12.5px/1.5 var(--mono); }
+  .btns { display: flex; gap: 8px; }
+  button { font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  h4 { margin: 0 0 6px; font-size: 13px; }
+
+  #idle { text-align: center; padding: 80px 24px; color: var(--muted); }
+  #idle h2 { color: var(--ink); font-size: 20px; margin-bottom: 6px; }
+  #idle a { color: var(--accent); }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; padding: 16px; }
+    header { padding: 12px 16px; }
+    #transcript-card { position: static; height: 420px; }
+    .row { grid-template-columns: 18px 1fr; }
+    .row .val-cell { grid-column: 2; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <div>
+      <h1>SRP Benefits Verification</h1>
+      <div class="sub" id="sub">Waiting for a call</div>
+    </div>
+    <span class="pill" id="pill"><span class="dot"></span><span id="pill-text">Idle</span></span>
+    <div class="spacer"></div>
+    <div class="stat"><b id="captured">0 / 0</b><span>Fields resolved</span></div>
+    <div class="stat"><b id="clock">0:00</b><span>Call time</span></div>
+  </div>
+  <div class="progress"><div id="bar"></div></div>
+  <div class="stages" id="stages"></div>
+</header>
+
+<div id="idle">
+  <h2>No call yet</h2>
+  <p>Start a call at <a href="/client/" target="_blank">/client/</a>. This page fills in live as the rep talks.</p>
+</div>
+
+<main id="main" hidden>
+  <section class="card" id="transcript-card">
+    <h2>Live transcript <span id="turns"></span></h2>
+    <div id="transcript"></div>
+  </section>
+  <div class="right">
+    <section class="card" id="result-card">
+      <h2>Final result
+        <span class="btns"><button id="copy">Copy JSON</button><button id="download">Download</button></span>
+      </h2>
+      <div class="result-body">
+        <div id="nulls-wrap"><h4>Empty fields, and why (never guessed)</h4><div class="nulls" id="nulls"></div></div>
+        <div id="disc-wrap"></div>
+        <div><h4>reference.json</h4><pre id="json"></pre></div>
+      </div>
+    </section>
+    <section class="card" id="missing-card">
+      <h2>Still to ask <span id="missing-count"></span></h2>
+      <div id="missing"></div>
+    </section>
+    <section class="card">
+      <h2>Checklist <span class="sub" style="text-transform:none;letter-spacing:0">every value carries the rep's exact words</span></h2>
+      <div id="groups"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const SPEAKER = { rep: "Insurance rep", agent: "Ava (agent)", ivr: "Phone menu" };
+const STATUS = { idle: "Idle", live: "Live", finalizing: "Checking results…", done: "Call complete" };
+const TAG = { corrected_on_readback: "corrected on read-back", needs_review: "needs review",
+              refused: "refused", unknown: "unknown", not_asked: "not asked" };
+
+let lastCall = null, lastTurns = 0, seen = {}, lastJson = "";
+
+function clock(sec) {
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function renderHeader(d) {
+  $("pill").className = "pill " + d.status;
+  $("pill-text").textContent = d.status === "live" ? `Live · ${d.stages.find((s) => s.key === d.stage)?.label ?? d.stage}` : STATUS[d.status];
+  if (d.status === "idle") return;
+  $("sub").textContent = `${d.patient} · ${d.practice} · ${d.call_sid}`;
+  $("captured").textContent = `${d.captured} / ${d.total}`;
+  $("bar").style.width = `${Math.round((100 * d.captured) / d.total)}%`;
+  $("clock").textContent = clock(d.elapsed_sec);
+  const at = d.stages.findIndex((s) => s.key === d.stage);
+  $("stages").innerHTML = d.stages
+    .map((s, i) => `<span class="${i < at || d.status === "done" ? "past" : i === at ? "now" : ""}">${esc(s.label)}</span>`)
+    .join("");
+}
+
+function renderTranscript(d) {
+  const box = $("transcript");
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (d.transcript.length < lastTurns) { box.innerHTML = ""; lastTurns = 0; }
+  for (const t of d.transcript.slice(lastTurns)) {
+    const el = document.createElement("div");
+    el.className = `turn ${t.speaker}`;
+    el.id = `turn-${t.idx}`;
+    el.innerHTML = `<div class="who">${SPEAKER[t.speaker] ?? t.speaker} <i>#${t.idx}</i></div><div class="bubble">${esc(t.text)}</div>`;
+    box.appendChild(el);
+  }
+  lastTurns = d.transcript.length;
+  const cited = new Set(d.fields.map((f) => f.turn).filter((t) => t != null));
+  box.querySelectorAll(".turn").forEach((el) => el.classList.toggle("cited", cited.has(+el.id.slice(5))));
+  $("turns").textContent = `${d.transcript.length} turns`;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+function renderMissing(d) {
+  $("missing-card").hidden = d.status === "done";
+  $("missing-count").textContent = d.missing.length ? `${d.missing.length} left` : "";
+  $("missing").innerHTML = d.missing.length
+    ? d.missing.map((m) => `<span class="chip ${m.current ? "current" : ""}" title="${esc(m.path)}">${esc(m.label)}</span>`).join("")
+    : `<div class="empty">Nothing left to ask.</div>`;
+}
+
+let lastFields = "";
+function renderFields(d) {
+  const sig = JSON.stringify(d.fields);
+  if (sig === lastFields) return;  // rebuild only on change, so the green flash can fade
+  lastFields = sig;
+  const html = Object.entries(d.groups).map(([key, title]) => {
+    const rows = d.fields.filter((f) => f.group === key);
+    const done = rows.filter((f) => f.status !== "pending").length;
+    return `<div class="group"><h3>${esc(title)}<small>${done}/${rows.length}</small></h3>${rows.map(row).join("")}</div>`;
+  }).join("");
+  $("groups").innerHTML = html;
+  for (const f of d.fields) {
+    const key = `${f.status}|${f.value}`;
+    if (lastCall === d.call_sid && seen[f.path] !== undefined && seen[f.path] !== key && f.status !== "pending") {
+      const el = document.querySelector(`[data-path="${CSS.escape(f.path)}"]`);
+      el?.classList.add("flash");
+      setTimeout(() => el?.classList.remove("flash"), 60);
+    }
+    seen[f.path] = key;
+  }
+}
+
+function row(f) {
+  const opt = f.required ? "" : ` <span class="opt">optional</span>`;
+  let val;
+  if (f.status === "pending") val = "waiting…";
+  else if (f.value == null) val = "—";
+  else val = (f.previous != null && f.previous !== f.value ? `<s>${esc(f.previous)}</s>` : "") + esc(f.value);
+  const tag = TAG[f.status] ? `<span class="tag ${f.status}">${TAG[f.status]}</span>` : "";
+  const src = f.source === "postcall" ? `<span class="tag postcall">from post-call check</span>` : "";
+  const quote = f.quote && f.status !== "pending"
+    ? `<div class="quote">“${esc(f.quote)}”${f.turn != null ? `<a data-turn="${f.turn}">#${f.turn}</a>` : ""}</div>` : "";
+  return `<div class="row ${f.status}" data-path="${esc(f.path)}"><span class="mark"></span>
+    <div class="label">${esc(f.label)}${opt}</div>
+    <div class="val-cell"><span class="val">${val}</span>${tag}${src}${quote}</div></div>`;
+}
+
+function renderResult(d) {
+  const card = $("result-card");
+  card.classList.toggle("show", !!d.result);
+  if (!d.result) return;
+  const json = JSON.stringify(d.result.reference, null, 2);
+  if (json === lastJson) return;
+  lastJson = json;
+  $("json").textContent = json;
+  $("nulls").innerHTML = d.result.nulls.length
+    ? d.result.nulls.map((n) => `<div class="null"><b>${esc(n.path)}</b> <span class="tag ${n.status}">${esc(TAG[n.status] ?? n.status)}</span>
+        <div>${esc(n.reason)}${n.quote ? ` Rep said: “${esc(n.quote)}”` : ""}</div></div>`).join("")
+    : `<div class="empty" style="padding:0">Every field has a value.</div>`;
+  const disc = d.result.discrepancies || [];
+  $("disc-wrap").innerHTML = disc.length
+    ? `<h4>Post-call check: ${disc.length} difference${disc.length > 1 ? "s" : ""} with the live capture</h4><pre>${esc(JSON.stringify(disc, null, 2))}</pre>`
+    : "";
+  window.scrollTo({ top: 0, behavior: "smooth" });  // the result card sits at the top of the right column
+}
+
+async function tick() {
+  try {
+    const d = await (await fetch("/live/state", { cache: "no-store" })).json();
+    $("idle").hidden = d.status !== "idle";
+    $("main").hidden = d.status === "idle";
+    renderHeader(d);
+    if (d.status !== "idle") {
+      if (d.call_sid !== lastCall) { seen = {}; lastTurns = 0; lastJson = ""; $("transcript").innerHTML = ""; }
+      renderTranscript(d);
+      renderMissing(d);
+      renderFields(d);
+      renderResult(d);
+      lastCall = d.call_sid;
+    }
+  } catch (e) {
+    $("pill-text").textContent = "Server not reachable";
+  }
+  setTimeout(tick, 1000);
+}
+
+document.addEventListener("click", (e) => {
+  const turn = e.target.dataset?.turn;
+  if (turn == null) return;
+  const el = $(`turn-${turn}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1500);
+});
+$("copy").onclick = () => navigator.clipboard.writeText(lastJson);
+$("download").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lastJson], { type: "application/json" }));
+  a.download = `${lastCall || "result"}-reference.json`;
+  a.click();
+};
+tick();
+</script>
+</body>
+</html>

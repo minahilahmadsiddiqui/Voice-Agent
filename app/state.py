@@ -174,6 +174,7 @@ class CallState:
         self.intro_given = False  # the scripted introduction (practice, provider, tax ID, NPI, callback)
         self.resume_stage: str | None = None  # stage to return to after a mid-call hold
         self.asked_before_leaving = False  # rep wanted to go; we asked once for the reference
+        self.pressed: set[str] = set()  # fields we already asked again after a vague answer
         self.hints: list[str] = []  # sanity checks for the agent, handed over in the next tool result
         self.agent_reply = ""  # what the LLM has said so far in its current reply
         self.rep_stopped_at: float | None = None  # end of the rep's last turn (for latency logs)
@@ -317,6 +318,11 @@ class CallState:
             except ValueError as e:
                 return str(e)
             qc.code = (code or "").upper() or None
+            if not qc.code:
+                # The LLM sometimes leaves the code out although the rep said it ("I show D4341
+                # paid..."): take it from the rep's words when exactly one SRP code is there.
+                said = set(re.findall(r"\bD ?434([12])\b", quote or self.last_rep_text(), re.I))
+                qc.code = f"D434{said.pop()}" if len(said) == 1 else None
         else:
             qc.paid, qc.code = None, None
         qc.on_file, qc.status = on_file, FieldStatus.ANSWERED

@@ -48,6 +48,20 @@ class Settings(BaseModel):
 
     public_url: str = ""
     port: int = 8765
+    # Browser mode from another network: a TURN server relays the audio when a strict home
+    # router blocks the direct path. Comma-separated URLs (free at metered.ca); empty = STUN only.
+    turn_urls: str = ""
+    turn_username: str = ""
+    turn_credential: str = ""
+
+    def ice_servers(self) -> list[dict]:
+        """WebRTC helpers for the browser and the server: Google STUN, plus TURN when set."""
+        servers: list[dict] = [{"urls": ["stun:stun.l.google.com:19302"]}]
+        urls = [u.strip() for u in self.turn_urls.split(",") if u.strip()]
+        if urls and self.turn_username:  # TURN needs the credential from metered.ca
+            servers.append({"urls": urls, "username": self.turn_username,
+                            "credential": self.turn_credential})
+        return servers
 
     @property
     def ws_url(self) -> str:

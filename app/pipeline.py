@@ -57,11 +57,12 @@ from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketTransport,
 )
 
+from app import live
 from app import speech_format as sf
 from app.callflow.nodes import build_node, enter_stage
 from app.gemini_pool_llm import PooledGoogleLLMService
 from app.model_pool import ModelPool, parse_pool
-from app.callflow.tools import is_hold_request, is_stall, looks_like_person, run_tool
+from app.callflow.tools import is_hold_recording, is_hold_request, is_stall, looks_like_person, run_tool
 from app.config import CALLS_DIR, Scenario, groq_reasoning, load_scenario, settings
 from app.results import finalize_call
 from app.state import CallState
@@ -373,6 +374,10 @@ class StallAck(FrameProcessor):
                 self._last_ack = time.time()
                 await self._speak(STALL_ACK)
             return  # swallowed: the LLM doesn't answer a stall
+        if (isinstance(frame, TranscriptionFrame) and self._state.stage == "hold"
+                and is_hold_recording(frame.text)):
+            self._state.add_turn("ivr", frame.text)
+            return  # swallowed: a hold message never wakes the LLM
         await self.push_frame(frame, direction)
 
 
@@ -397,6 +402,7 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
                            sample_rate: int | None = TWILIO_SAMPLE_RATE, kind: str = "live") -> None:
     """The real call: Pipecat Flows stages driven by the CallState checklist."""
     state = CallState(sc, call_sid=call_sid)
+    live.track(state)
     llm = make_llm()
     context = LLMContext(messages=[])
     aggregators = LLMContextAggregatorPair(
@@ -539,4 +545,4 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         await task.cancel()
 
     await WorkerRunner(handle_sigint=False).run(task)
-    await finalize_call(state, kind=kind, scenario=scenario_name)
+    live.finish(state, await finalize_call(state, kind=kind, scenario=scenario_name))

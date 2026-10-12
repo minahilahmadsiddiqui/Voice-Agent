@@ -105,6 +105,17 @@ def is_stall(text: str) -> bool:
     return bool(text) and len(text.split()) <= 10 and bool(_STALL.match(text)) and not re.search(r"\d", text)
 
 
+# Hold music as a transcript placeholder ("(hold music)", "[music]", "♪").
+_MUSIC = re.compile(r"^\W*[(\[]?\s*(?:hold )?music\b|♪|^\W*[(\[][^)\]]*[)\]]\W*$", re.I)
+
+
+def is_hold_recording(text: str) -> bool:
+    """On hold, a recorded message or music that clearly isn't a person: the code stays
+    silent and the LLM isn't asked at all (it sometimes answered "I'll keep holding")."""
+    text = (text or "").strip()
+    return bool(text) and not _PERSON.search(text) and bool(_RECORDING.search(text) or _MUSIC.search(text))
+
+
 def looks_like_person(text: str, mid_call: bool = False) -> bool:
     """Heuristic: does this turn sound like a live person rather than a recording?
 
@@ -169,7 +180,15 @@ def record_fields(state: CallState, args: dict) -> Outcome:
 
 def mark_unresolved(state: CallState, args: dict) -> Outcome:
     status = FieldStatus.REFUSED if args.get("status") == "refused" else FieldStatus.UNKNOWN
-    err = state.mark(args.get("path", ""), status, args.get("quote"))
+    path = args.get("path", "")
+    # A vague answer ("it should be covered") gets one follow-up before we give up on it:
+    # the prompt asks for this, but the LLM sometimes gives up at once. A refusal is final.
+    if status == FieldStatus.UNKNOWN and path in state.values and path not in state.pressed:
+        state.pressed.add(path)
+        return Outcome({"not_marked": path,
+                        "note": f"Vague answers get one follow-up. Ask once more, briefly: {state.ask_for(path)} "
+                                "If they still can't say, call mark_unresolved again."}, confirm=True)
+    err = state.mark(path, status, args.get("quote"))
     return _advance(state, {"error": err} if err else {"marked": args.get("path"), "status": status.value})
 
 
