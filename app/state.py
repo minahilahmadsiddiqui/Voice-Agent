@@ -143,6 +143,8 @@ def _speak(spec: FieldSpec, value: Any) -> str:
     return str(value).replace("_", " ")
 
 
+SORRY = "Sorry, I didn't quite catch that."
+
 _STOP = {"the", "and", "for", "that", "this", "with", "are", "was", "has", "have", "its", "it's", "you", "she",
          "her", "our", "your", "but", "not", "any", "per", "they"}
 
@@ -171,6 +173,7 @@ class CallState:
         self.rep_first_name: str | None = None
         self.readback_done = False
         self.readback_spoken = False  # the scripted read-back is said once; corrections go through the LLM
+        self.readback_pressed = False  # rep sounded like a correction but none came through: asked once
         self.intro_given = False  # the scripted introduction (practice, provider, tax ID, NPI, callback)
         self.resume_stage: str | None = None  # stage to return to after a mid-call hold
         self.asked_before_leaving = False  # rep wanted to go; we asked once for the reference
@@ -427,6 +430,26 @@ class CallState:
             if "call.disclaimer" in missing:
                 return "And to confirm for our file, this quote is not a guarantee of payment?"
         return None
+
+    def last_agent_text(self) -> str | None:
+        for t in reversed(self.transcript):
+            if t.speaker == "agent":
+                return t.text
+        return None
+
+    def soften_repeat(self, line: str) -> str:
+        """Asking the exact same question twice in a row sounds broken. When the code must
+        re-ask (the answer didn't come through), it apologises first, like a person would."""
+        norm = lambda t: " ".join(_words(t))  # noqa: E731
+        last = self.last_agent_text() or ""
+        if norm(line) and norm(line) in norm(last):
+            return f"{SORRY} {line}"
+        return line
+
+    def correction_line(self, paths: list[str]) -> str:
+        """Says each read-back correction back to the rep, from state (not LLM memory)."""
+        parts = [f"the {SPECS[p].ask} to {_speak(SPECS[p], self.value(p))}" for p in paths if p in SPECS]
+        return f"Got it, correcting {' and '.join(parts)}." if parts else ""
 
     def intro_line(self) -> str:
         """Who we are, in the reference call's order: identity first, before anything is asked."""

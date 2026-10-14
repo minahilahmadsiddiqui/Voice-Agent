@@ -299,3 +299,57 @@ def test_vague_answer_gets_one_follow_up_before_unknown():
     assert s.values["srp.codes.D4341.coverage_pct"].status == FieldStatus.UNKNOWN
     run_tool(s, "mark_unresolved", {"path": "srp.annual_max", "status": "refused"})
     assert s.values["srp.annual_max"].status == FieldStatus.REFUSED  # a refusal is final at once
+
+
+def _readback_state():
+    s = _state("readback")
+    s.record("srp.annual_max", "1500", "1500")
+    s.record("srp.remaining", "1340", "1340 remaining")
+    return s
+
+
+def test_readback_not_closed_when_rep_starts_a_correction():
+    # Live test: "1 thing is remaining" arrived alone and the agent moved on to the reference number.
+    s = _readback_state()
+    s.add_turn("rep", "1 thing is remaining")
+    out = run_tool(s, "readback_done", {"corrections": []})
+    assert s.stage == "readback" and not s.readback_done and out.confirm
+    assert "What should I correct" in out.result["note"]
+    s.add_turn("rep", "No, everything else is fine.")
+    run_tool(s, "readback_done", {"corrections": []})  # asked once; never trap the rep
+    assert s.readback_done
+
+
+def test_readback_correction_to_the_same_value_is_rejected():
+    # Live test: STT heard "not $12.47" and the agent "corrected" remaining to 1340 again.
+    s = _readback_state()
+    s.add_turn("rep", "The remaining amount is not $12.47.")
+    out = run_tool(s, "readback_done", {"corrections": [
+        {"path": "srp.remaining", "value": "1340", "quote": "remaining amount is not $12.47"}]})
+    assert out.result["errors"] and out.confirm and not s.readback_done
+    assert s.values["srp.remaining"].status == FieldStatus.ANSWERED
+
+
+def test_readback_correction_is_said_back_by_code():
+    s = _readback_state()
+    s.add_turn("rep", "The remaining is twelve forty-seven now.")
+    out = run_tool(s, "readback_done", {"corrections": [
+        {"path": "srp.remaining", "value": "1247", "quote": "The remaining is twelve forty-seven now."}]})
+    assert s.value("srp.remaining") == 1247 and s.stage == "close"
+    assert out.say and "correcting" in out.say and "one thousand two hundred forty-seven" in out.say
+
+
+def test_readback_plain_confirmation_closes():
+    s = _readback_state()
+    s.add_turn("rep", "Yes, that's all correct.")
+    run_tool(s, "readback_done", {"corrections": []})
+    assert s.readback_done
+
+
+def test_same_question_twice_gets_an_apology():
+    s = _state("close")
+    q = "Can I get a call reference number and your full name?"
+    s.add_turn("agent", q)
+    s.add_turn("rep", "is 12")
+    assert s.soften_repeat(q).startswith("Sorry, I didn't quite catch that.")
+    assert s.soften_repeat("And your last name?") == "And your last name?"

@@ -393,7 +393,9 @@ FILLER_AFTER_SECS = 1.3  # no reply yet this long after the rep stopped -> "Got 
 FILLER_GAP_SECS = 6  # at most one filler in this window
 WATCHDOG_SECS = 6  # still nothing said this long after the rep stopped -> code asks the next question
 FILLERS = ["Got it.", "Okay.", "Okay, thanks."]
-SMART_TURN_STOP_SECS = 1.5  # longest wait when the rep sounds unfinished (Pipecat default 3)
+# Longest wait when the rep sounds unfinished ("$50 and..."). 1.5 s cut people off mid-sentence;
+# a finished-sounding answer ("Two.") still ends the turn at once.
+SMART_TURN_STOP_SECS = 3.0
 ANSWER_SILENCE_SECS = 3  # call answered but nobody speaks -> say "Hello?"
 HUMAN_FALLBACK_SECS = 0.8  # person spoke on menu/hold and the LLM didn't react -> code moves on
 
@@ -412,8 +414,8 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
             user_turn_strategies=UserTurnStrategies(
                 # While we speak, only 2+ real words interrupt us (not a cough, "mm-hm" or echo).
                 start=[MinWordsUserTurnStartStrategy(min_words=2)],
-                # Smart Turn waits up to 3 s by default when the rep *sounds* unfinished,
-                # which felt slow on short answers ("Two.", "Ninety days.").
+                # Smart Turn ends the turn at once when the rep sounds finished, and waits up to
+                # SMART_TURN_STOP_SECS when they sound mid-sentence.
                 stop=[TurnAnalyzerUserTurnStopStrategy(
                     turn_analyzer=LocalSmartTurnAnalyzerV3(params=SmartTurnParams(stop_secs=SMART_TURN_STOP_SECS)))],
             ),
@@ -450,6 +452,7 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
         """The code speaks a scripted line (next question, read-back) - no LLM round trip."""
         if state.rep_stopped_at and not state.agent_reply:
             logger.info(f"REPLY GAP {time.time() - state.rep_stopped_at:.2f}s (scripted line)")
+        text = state.soften_repeat(text)  # never the exact same question twice in a row
         state.agent_reply += text
         await gate.speak(text)
 

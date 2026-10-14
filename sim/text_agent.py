@@ -53,6 +53,7 @@ class TextAgent:
             self.messages.append({"role": "user", "content": blocks})
 
     def _say(self, line: str, turn: AgentTurn) -> None:
+        line = self.state.soften_repeat(line)  # same as the live call's say()
         turn.spoken = f"{turn.spoken} {line}".strip()
         self.messages.append({"role": "assistant", "content": [{"type": "text", "text": line}]})
 
@@ -129,6 +130,8 @@ class TextAgent:
                 turn.tools.append(u.name)
                 if outcome.dtmf:
                     turn.digits += outcome.dtmf
+                if outcome.say:
+                    self._say(outcome.say, turn)
                 if outcome.next_stage:
                     moved = True
                 if not outcome.respond:

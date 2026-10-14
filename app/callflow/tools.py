@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app import speech_format as sf
-from app.fields import QUADRANT_NAMES, QUADRANTS, RECORDABLE_PATHS
+from app.fields import QUADRANT_NAMES, QUADRANTS, RECORDABLE_PATHS, SPECS
 from app.schema import FieldStatus
-from app.state import SKIPPABLE, CallState
+from app.state import SKIPPABLE, CallState, coerce
 
 
 @dataclass
@@ -23,6 +23,7 @@ class Outcome:
     respond: bool = True  # False: stay silent until the other side speaks
     dtmf: str | None = None  # keypad tones to send
     confirm: bool = False  # something must be checked with the rep: speak again even if we already did
+    say: str | None = None  # a line the code speaks first (e.g. a read-back correction said back)
 
 
 @dataclass
@@ -232,17 +233,49 @@ def member_not_found(state: CallState, args: dict) -> Outcome:
                    next_stage=state.next_stage(after="readback"))
 
 
+# The rep is changing something ("one thing is wrong", "that's not 1340", "it's 1247 now").
+_CORRECTION_CUES = re.compile(
+    r"\b(wrong|not|isn't|incorrect|change[ds]?|actually|update[ds]?|instead|one thing|1 thing|except|but)\b|\d", re.I)
+
+
+def looks_like_correction(text: str | None) -> bool:
+    return bool(text and _CORRECTION_CUES.search(text))
+
+
 def readback_done(state: CallState, args: dict) -> Outcome:
-    applied = []
     items, errors = _items(args, "corrections")
+    if not items and not errors and not state.readback_pressed and looks_like_correction(state.last_rep_text()):
+        # "One thing is remaining..." then nothing: the rep wasn't done. Never close the
+        # read-back on a correction we didn't catch; ask once what to fix.
+        state.readback_pressed = True
+        return Outcome({"not_done": True,
+                        "note": "The rep seems to be correcting something, but no correction was recorded. Ask: "
+                                "\"Sorry, I didn't quite catch that. What should I correct?\" Then call "
+                                "readback_done with the correction."}, confirm=True)
+    for item in items:
+        path = item.get("path", "")
+        if path in state.values and state.value(path) is not None:
+            try:
+                same = coerce(SPECS[path], item.get("value")) == state.value(path)
+            except (ValueError, KeyError):
+                same = False
+            if same:
+                errors.append(f"{path}: {item.get('value')} is the value you already had, so the new value "
+                              f"was not heard. Ask the rep: \"Sorry, I didn't quite catch that. What is the "
+                              f"correct {SPECS[path].ask}?\"")
+    if errors:
+        return Outcome({"errors": errors, "note": "fix the paths/values and call readback_done again"}, confirm=True)
+    applied = []
     for item in items:
         err = state.correct(item.get("path", ""), item.get("value"), item.get("quote"))
         (errors if err else applied).append(err or item.get("path"))
     if errors:
-        return Outcome({"errors": errors, "note": "fix the paths/values and call readback_done again"})
+        return Outcome({"errors": errors, "note": "fix the paths/values and call readback_done again"}, confirm=True)
     state.readback_done = True
     state.log("readback", corrections=applied)
-    return Outcome({"corrections_applied": applied}, next_stage=state.next_stage())
+    # The correction is said back by code, so the rep always hears what we changed.
+    return Outcome({"corrections_applied": applied}, next_stage=state.next_stage(),
+                   say=state.correction_line(applied) or None)
 
 
 def end_call(state: CallState, args: dict) -> Outcome:

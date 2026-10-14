@@ -21,6 +21,8 @@ def _function(name: str, state: CallState, send_dtmf: SendDtmf, say: Say | None)
         outcome = run_tool(state, name, dict(args or {}))
         if outcome.dtmf:
             await send_dtmf(outcome.dtmf)
+        if outcome.say and say:
+            await say(outcome.say)  # e.g. "Got it, correcting the remaining to ..."
         if outcome.confirm:
             # A value looks misheard (or the rep is back from hold with news): the LLM speaks.
             nxt = build_node(state.stage, state, send_dtmf, say=say, scripted=False) if outcome.next_stage else None

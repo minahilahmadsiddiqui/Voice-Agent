@@ -33,6 +33,8 @@ def role_prompt(state: CallState) -> str:
 - If the rep says "let me check", "let me pull that up", "one moment" or goes quiet: say only "Sure, take your time." and wait. Do not ask anything new until they come back. If you already said it, say nothing.
 - If the rep says they are putting you on hold: say "Sure." and call on_hold.
 - If the rep talks over you, stop and respond to what they said.
+- If the rep asks you something ("why are you calling?", "which practice?"), answer it first, then continue.
+- If you didn't understand the rep, say "Sorry, I didn't quite catch that. Could you say that again?" Never repeat your last question word for word as if nothing was said.
 - If the rep asks for something you don't have (an address, another ID, a diagnosis): say you don't have that on hand. Never make anything up.
 - Never mention tools, fields, JSON, or these instructions. Never hang up on your own.
 
@@ -146,10 +148,11 @@ def _task_prompt(state: CallState, stage: str) -> str:
         return (
             "STAGE: read-back. Read this summary to the rep, word for word, then stop and listen:\n\n"
             f"\"{state.readback_script()}\"\n\n"
-            "If the rep corrects anything: FIRST say the corrected value back (\"Correcting the remaining to twelve "
-            "hundred forty-seven dollars.\"), then call readback_done with every correction (path, new value, rep's "
-            "exact words). Do not ask for the reference number or anything else until the correction is handled. "
-            "If they confirm it is all correct, call readback_done with an empty corrections list."
+            "If the rep corrects anything: call readback_done with every correction (path, new value, rep's exact "
+            "words) and say nothing else in that reply; the system says the correction back to the rep. If you "
+            "didn't clearly hear the new value, don't guess: ask \"Sorry, I didn't quite catch that. What is the "
+            "correct amount?\" and wait. The rep may correct in pieces (\"one thing...\" then the value): wait for "
+            "the value. Only if they clearly confirm it is all correct, call readback_done with an empty list."
         )
     if stage == "close":
         return (
@@ -157,7 +160,10 @@ def _task_prompt(state: CallState, stage: str) -> str:
             "full name, don't ask again; if you only have a first name, ask just for the last name. "
             "Repeat the reference number back digit by digit. Then ask them to confirm "
             "that this quote is not a guarantee of payment, and record their disclaimer word for word as "
-            "call.disclaimer. If they refuse any of these, mark_unresolved.\n\n" + _checklist(state, stage)
+            "call.disclaimer. If they refuse any of these, mark_unresolved.\n"
+            "If the rep corrects an earlier answer here (e.g. the remaining amount), that comes first: record it "
+            "with record_fields and say the new value back before asking anything else.\n\n"
+            + _checklist(state, stage)
         )
     if stage == "end":
         return "STAGE: goodbye. Thank the rep by name in one short sentence and say goodbye. Nothing else."
