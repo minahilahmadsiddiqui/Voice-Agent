@@ -54,6 +54,7 @@ def press_digits(state: CallState, args: dict) -> Outcome:
         return Outcome({"error": "no valid keys; use 0-9, * and #"})
     state.digits_sent.append(digits)
     state.log("dtmf", digits=digits)
+    state.add_turn("agent", f"[ DTMF: {digits} ]")  # so /live shows the keys pressed
     return Outcome({"sent": digits}, respond=False, dtmf=digits)
 
 

@@ -21,6 +21,10 @@ from app.pipeline import run_call
 from app.storage import set_recording
 from app.telephony import start_call
 
+# Keep the server log on disk too, so a bad call can be looked at afterwards.
+CALLS_DIR.mkdir(exist_ok=True)
+logger.add(CALLS_DIR / "server.log", level="DEBUG", rotation="20 MB", retention=5, encoding="utf-8")
+
 app = FastAPI(title="SRP Voice Agent")
 app.include_router(ivr_router)
 app.include_router(browser_router)

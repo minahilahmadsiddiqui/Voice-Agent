@@ -169,3 +169,25 @@ def speakable_ids(text: str) -> str:
         return spell_id(s) if s[0].isalpha() else spell_digits(s)
 
     return _ID_LIKE.sub(fix, text)
+
+
+# ---------- for the screen ----------
+# The voice must say "eight four, one five five", but on screen IDs read better as digits.
+_DIGIT_WORD = r"(?:zero|one|two|three|four|five|six|seven|eight|nine)"
+_DIGIT_RUN = re.compile(rf"\b{_DIGIT_WORD}(?:,? {_DIGIT_WORD})+\b", re.IGNORECASE)
+# spell_id's letter prefix: "M, D, B, 40719883" -> "MDB40719883"
+_LETTER_PREFIX = re.compile(r"\b((?:[A-Z], ){2,})(\d)")
+_WORD_VALUE = {w: str(i) for i, w in enumerate(DIGITS)}
+
+
+def display_digits(text: str) -> str:
+    """Spoken digit runs back to numerals, for display only (never send this to TTS).
+
+    "tax ID eight four, one five five, two zero three seven" -> "tax ID 841552037"
+    A lone "one" stays a word ("one more question"); it takes two digit words in a row.
+    """
+    def fix(m: re.Match) -> str:
+        return "".join(_WORD_VALUE[w.lower()] for w in re.findall(r"[A-Za-z]+", m.group(0)))
+
+    text = _DIGIT_RUN.sub(fix, text).replace("N P I", "NPI")
+    return _LETTER_PREFIX.sub(lambda m: m.group(1).replace(", ", "") + m.group(2), text)

@@ -181,6 +181,7 @@ class CallState:
         self.hints: list[str] = []  # sanity checks for the agent, handed over in the next tool result
         self.agent_reply = ""  # what the LLM has said so far in its current reply
         self.rep_stopped_at: float | None = None  # end of the rep's last turn (for latency logs)
+        self.rep_words_at = 0.0  # last time speech-to-text heard words from the rep (noise has none)
         self.ended_reason: str | None = None
         self.connected_at = time.time()
         self.human_at: float | None = None

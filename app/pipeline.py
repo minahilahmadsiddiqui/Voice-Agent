@@ -23,11 +23,14 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     FunctionCallResultProperties,
+    LLMMessagesAppendFrame,
     LLMTextFrame,
     OutputDTMFFrame,
     TTSSpeakFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frameworks.rtvi.models import BotOutputTransformResult
+from pipecat.processors.frameworks.rtvi.observer import RTVIFunctionCallReportLevel, RTVIObserverParams
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -46,7 +49,7 @@ from pipecat.services.llm_service import FunctionCallParams
 from pipecat.workers.runner import WorkerRunner
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
-from pipecat.frames.frames import TranscriptionFrame
+from pipecat.frames.frames import InterimTranscriptionFrame, TranscriptionFrame
 from pipecat.turns.empty_user_turn import EmptyUserTurnConfig
 from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
@@ -154,6 +157,15 @@ async def press_digits(params: FunctionCallParams):
     )
 
 
+async def show_digits(text: str, _agg_type: str, accumulated: str | None, remaining: str | None):
+    """Playground text: "eight four, one five five" -> "84155". The voice is unchanged."""
+    return BotOutputTransformResult(
+        text=sf.display_digits(text),
+        accumulated_text=sf.display_digits(accumulated) if accumulated is not None else None,
+        remaining_text=sf.display_digits(remaining) if remaining is not None else None,
+    )
+
+
 def make_worker(pipeline: Pipeline, sample_rate: int | None = TWILIO_SAMPLE_RATE) -> PipelineWorker:
     """sample_rate: 8000 for phone calls; None lets a browser session use Pipecat's defaults."""
     rates = {"audio_in_sample_rate": sample_rate, "audio_out_sample_rate": sample_rate} if sample_rate else {}
@@ -165,6 +177,14 @@ def make_worker(pipeline: Pipeline, sample_rate: int | None = TWILIO_SAMPLE_RATE
             enable_usage_metrics=True,
         ),
         idle_timeout_secs=MAX_IDLE_SECS,
+        # Let the browser client see which keys were pressed (other tools stay hidden).
+        rtvi_observer_params=RTVIObserverParams(
+            function_call_report_level={
+                "*": RTVIFunctionCallReportLevel.NONE,
+                "press_digits": RTVIFunctionCallReportLevel.ARGUMENTS,
+            },
+            bot_output_transforms=[("*", show_digits)],
+        ),
     )
 
 
@@ -357,10 +377,13 @@ class StallAck(FrameProcessor):
         self._state = state
         self._speak = speak  # SpeechGate.speak: straight to the voice
         self._go_on_hold = go_on_hold  # switches the call to the hold stage (mute until they're back)
+        self._on_typed = None  # rep_finished: a line typed in the browser counts as a rep turn
         self._last_ack = 0.0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
+        if isinstance(frame, (InterimTranscriptionFrame, TranscriptionFrame)) and frame.text.strip():
+            self._state.rep_words_at = time.time()  # the rep is talking (words, not noise)
         if (isinstance(frame, TranscriptionFrame) and self._go_on_hold
                 and self._state.stage not in ("ivr", "hold", "end") and is_hold_request(frame.text)):
             self._state.add_turn("rep", frame.text)
@@ -378,6 +401,12 @@ class StallAck(FrameProcessor):
                 and is_hold_recording(frame.text)):
             self._state.add_turn("ivr", frame.text)
             return  # swallowed: a hold message never wakes the LLM
+        if isinstance(frame, LLMMessagesAppendFrame) and self._on_typed:
+            # Typed in the Playground: it skips the turn events, so without this the rep's
+            # words aren't saved and the agent goes quiet after its first tool call.
+            for m in frame.messages:
+                if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), str):
+                    await self._on_typed(m["content"])
         await self.push_frame(frame, direction)
 
 
@@ -389,10 +418,12 @@ RESUME_AFTER_NOISE = (
 )
 
 IDLE_CHECK_SECS = 30  # rep silent this long after we spoke -> one gentle check-in
-FILLER_AFTER_SECS = 1.3  # no reply yet this long after the rep stopped -> "Got it."
+FILLER_AFTER_SECS = 2.5  # no reply yet this long after the rep stopped -> "Got it." (only real dead air)
 FILLER_GAP_SECS = 6  # at most one filler in this window
 WATCHDOG_SECS = 6  # still nothing said this long after the rep stopped -> code asks the next question
 FILLERS = ["Got it.", "Okay.", "Okay, thanks."]
+REP_TALKING_SECS = 1.0  # words heard this recently -> the rep is still talking: the code doesn't cut in
+SAY_WAIT_SECS = 3.0  # a scripted line waits at most this long for the rep to finish
 # Longest wait when the rep sounds unfinished ("$50 and..."). 1.5 s cut people off mid-sentence;
 # a finished-sounding answer ("Two.") still ends the turn at once.
 SMART_TURN_STOP_SECS = 3.0
@@ -450,6 +481,10 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
 
     async def say(text: str) -> None:
         """The code speaks a scripted line (next question, read-back) - no LLM round trip."""
+        waited = 0.0
+        while rep_talking() and waited < SAY_WAIT_SECS:  # never talk over the rep
+            await asyncio.sleep(0.2)
+            waited += 0.2
         if state.rep_stopped_at and not state.agent_reply:
             logger.info(f"REPLY GAP {time.time() - state.rep_stopped_at:.2f}s (scripted line)")
         text = state.soften_repeat(text)  # never the exact same question twice in a row
@@ -458,11 +493,16 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
 
     last_filler = {"t": 0.0}
 
+    def rep_talking() -> bool:
+        # Words after the turn we're answering: the rep paused mid-answer and went on.
+        return (state.rep_words_at > (state.rep_stopped_at or 0)
+                and time.time() - state.rep_words_at < REP_TALKING_SECS)
+
     async def watchdog(stopped_at: float):
         # Free LLMs sometimes return an empty reply. Never leave the rep in silence: if
         # nothing was said, the code asks the next question on the checklist.
         await asyncio.sleep(WATCHDOG_SECS)
-        if state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted:
+        if state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted and not rep_talking():
             line = state.next_line()
             if line:
                 logger.warning("No reply from the LLM: asking the next question from code")
@@ -471,7 +511,7 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
     async def filler_if_slow(stopped_at: float):
         # The free LLM sometimes takes seconds. Rather than dead air, acknowledge briefly.
         await asyncio.sleep(FILLER_AFTER_SECS)
-        if (state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted
+        if (state.rep_stopped_at == stopped_at and not state.agent_reply and not state.muted and not rep_talking()
                 and time.time() - last_filler["t"] > FILLER_GAP_SECS):
             last_filler["t"] = time.time()
             logger.info("Reply is slow: saying a short acknowledgement")
@@ -512,9 +552,8 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
     async def on_user_started(_agg, _strategy):
         idle["prompted"] = False
 
-    @aggregators.user().event_handler("on_user_turn_stopped")
-    async def on_user_stopped(_agg, _strategy, message):
-        text = message.content or ""
+    async def rep_finished(text: str) -> None:
+        """The rep (or the phone menu) finished a turn, spoken or typed in the browser."""
         state.agent_reply = ""  # a new LLM reply starts now
         state.rep_stopped_at = time.time()
         mid_call = state.resume_stage is not None
@@ -527,6 +566,15 @@ async def run_verification(transport, stt, tts, sc: Scenario, scenario_name: str
             if len(text.split()) >= 3 and not text.rstrip().endswith("?"):
                 asyncio.create_task(filler_if_slow(state.rep_stopped_at))
             asyncio.create_task(watchdog(state.rep_stopped_at))
+
+    stall_ack._on_typed = rep_finished
+
+    # Fires each time the rep's words go to the LLM. Not "on_user_turn_stopped": Pipecat skips
+    # that while it still hears sound (mic noise, echo of our voice), yet runs the LLM anyway -
+    # then the rep's words weren't saved and the agent went quiet after its first tool call.
+    @aggregators.user().event_handler("on_user_turn_message_added")
+    async def on_rep_words(_agg, message):
+        await rep_finished(message.content or "")
 
     @aggregators.assistant().event_handler("on_assistant_turn_stopped")
     async def on_assistant_stopped(_agg, message):

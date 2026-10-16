@@ -1,4 +1,5 @@
 from app.speech_format import (
+    display_digits,
     money,
     number_to_words,
     phone_number,
@@ -58,3 +59,15 @@ def test_number_words():
     assert number_to_words(0) == "zero"
     assert number_to_words(90) == "ninety"
     assert number_to_words(1500) == "one thousand five hundred"
+
+
+def test_display_digits_turns_spoken_ids_back_into_numbers():
+    spoken = (f"tax ID {spell_digits('84-1552037')}, N P I {spell_digits('1477588213')}. "
+              f"Callback is {phone_number('3035550192')}. Member ID, {spell_id('MDB40719883')}.")
+    assert display_digits(spoken) == (
+        "tax ID 841552037, NPI 1477588213. Callback is 3035550192. Member ID, MDB40719883.")
+
+
+def test_display_digits_leaves_normal_words_alone():
+    text = "Oh, one more question. Is it two or three?"
+    assert display_digits(text) == text

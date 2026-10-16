@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 
 from app.fields import FIELDS, QUADRANT_NAMES, QUADRANTS, SPECS
 from app.schema import FieldStatus
+from app.speech_format import display_digits
 from app.state import COLLECTING, RESOLVED, CallState
 
 router = APIRouter()
@@ -149,7 +150,7 @@ def snapshot() -> dict:
         "elapsed_sec": round((state.ended_at or time.time()) - state.connected_at),
         "patient": state.scenario.patient.name,
         "practice": state.scenario.practice.name,
-        "transcript": [{"idx": t.idx, "speaker": t.speaker, "text": t.text} for t in state.transcript],
+        "transcript": [{"idx": t.idx, "speaker": t.speaker, "text": display_digits(t.text)} for t in state.transcript],
         "groups": GROUPS,
         "fields": fields,
         "missing": [] if status == "done" else _missing(state),
